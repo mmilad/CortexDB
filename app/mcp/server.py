@@ -41,14 +41,23 @@ Token budget notes
 from __future__ import annotations
 
 import json
+import logging
+import time
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
 from app.schemas.dataset import DatasetRecord
 from app.schemas.tool import ToolRecord
 from app.store import SqliteStore, get_store
+
+logger = logging.getLogger("cortexdb.mcp")
+
+# Cache for remotely fetched JSON schemas: url → (schema_dict, fetched_at)
+_schema_cache: dict[str, tuple[dict, float]] = {}
+_SCHEMA_CACHE_TTL = 300.0  # seconds
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
@@ -310,6 +319,48 @@ def _handle_resources_read(params: dict, store: SqliteStore) -> dict:
     raise ValueError(f"Unknown resource URI: {uri}")
 
 
+def _resolve_input_schema(ref: str | None) -> dict[str, Any]:
+    """Resolve an input_schema_ref to an inline JSON Schema dict.
+
+    Resolution order:
+      1. If *ref* is already valid JSON → parse and return.
+      2. If *ref* starts with http:// or https:// → fetch with a 5 s timeout,
+         cache result for 5 minutes, return on success.
+      3. Fallback: return a minimal ``{"type": "object"}`` schema.
+    """
+    if not ref:
+        return {"type": "object", "properties": {}}
+
+    # Attempt inline JSON parse first
+    try:
+        parsed = json.loads(ref)
+        if isinstance(parsed, dict):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Attempt URL fetch
+    if ref.startswith("http://") or ref.startswith("https://"):
+        now = time.monotonic()
+        cached = _schema_cache.get(ref)
+        if cached is not None:
+            schema, fetched_at = cached
+            if now - fetched_at < _SCHEMA_CACHE_TTL:
+                return schema
+
+        try:
+            resp = httpx.get(ref, timeout=5.0, follow_redirects=True)
+            resp.raise_for_status()
+            schema = resp.json()
+            if isinstance(schema, dict):
+                _schema_cache[ref] = (schema, now)
+                return schema
+        except Exception as exc:
+            logger.warning("Could not fetch input_schema_ref '%s': %s", ref, exc)
+
+    return {"type": "object", "properties": {}}
+
+
 def _handle_tools_list(params: dict, store: SqliteStore) -> dict:
     """Return MCP tool descriptors generated from ToolRecord entries."""
     tools = []
@@ -317,20 +368,11 @@ def _handle_tools_list(params: dict, store: SqliteStore) -> dict:
         rec = ToolRecord(**data)
         if rec.status != "active":
             continue
-        input_schema: dict[str, Any] = {"type": "object", "properties": {}}
-        # If input_schema_ref is an inline JSON string, attempt to parse it.
-        if rec.input_schema_ref:
-            try:
-                parsed = json.loads(rec.input_schema_ref)
-                if isinstance(parsed, dict):
-                    input_schema = parsed
-            except (json.JSONDecodeError, TypeError):
-                pass
         tools.append(
             {
                 "name": rec.tool_key,
                 "description": _tool_description(rec),
-                "inputSchema": input_schema,
+                "inputSchema": _resolve_input_schema(rec.input_schema_ref),
             }
         )
     return {"tools": tools}
