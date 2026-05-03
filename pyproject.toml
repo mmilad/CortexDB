@@ -1,13 +1,15 @@
 [project]
 name = "cortexdb"
-version = "0.1.0"
-description = "Service-first memory/retrieval layer for agentic systems"
+version = "0.2.0"
+description = "LLM-native memory and retrieval layer for agentic systems"
 requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
   "pydantic>=2.8.0"
 ]
+# All storage uses Python stdlib sqlite3 — no additional DB dependencies needed.
+# Future: add psycopg2-binary for Postgres, pgvector for vector search.
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
