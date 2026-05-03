@@ -53,6 +53,7 @@ class MemoryItem(BaseModel):
     metadata: dict[str, Any]
     embedding_model: str | None
     created_at: str | None
+    is_deleted: bool = False
 
 
 class SearchRequest(BaseModel):
@@ -79,11 +80,37 @@ class SearchRequest(BaseModel):
         le=1.0,
         description="Minimum cosine similarity score (0–1) to include in results.",
     )
+    keyword_query: str | None = Field(
+        default=None,
+        description=(
+            "Optional keyword substring to match against raw_text (case-insensitive). "
+            "When provided alongside query, scores are blended: "
+            "final = vector_weight * vector_score + (1 - vector_weight) * keyword_score."
+        ),
+    )
+    vector_weight: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Weight applied to the vector score in hybrid mode (0–1). "
+            "1.0 = pure vector search (default). "
+            "0.5 = equal blend. 0.0 = pure keyword search."
+        ),
+    )
 
 
 class SearchHit(BaseModel):
     item: MemoryItem
-    score: float = Field(description="Cosine similarity score (0–1). Higher is more similar.")
+    score: float = Field(description="Final blended score (0–1). Higher is more similar.")
+    vector_score: float | None = Field(
+        default=None,
+        description="Raw cosine similarity component before blending.",
+    )
+    keyword_score: float | None = Field(
+        default=None,
+        description="Keyword match score component before blending (1.0 if keyword matched, 0.0 if not).",
+    )
 
 
 class SearchResponse(BaseModel):
@@ -91,3 +118,7 @@ class SearchResponse(BaseModel):
     query: str
     embedding_model: str | None
     total_searched: int = Field(description="Number of items scored before top_k filter.")
+    search_mode: str = Field(
+        default="vector",
+        description="Mode used: 'vector', 'keyword', or 'hybrid'.",
+    )

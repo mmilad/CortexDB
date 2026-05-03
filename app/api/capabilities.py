@@ -44,8 +44,13 @@ def capabilities(
         },
         "memory_endpoints": {
             "ingest": "/datasets/{key}/ingest",
-            "search": "/datasets/{key}/search",
+            "search": "/datasets/{key}/search (vector | keyword | hybrid)",
+            "re_embed": "/datasets/{key}/re-embed",
             "items": "/datasets/{key}/items",
+            "item": "/datasets/{key}/items/{id}",
+            "soft_delete_item": "DELETE /datasets/{key}/items/{id}",
+            "hard_delete_item": "DELETE /datasets/{key}/items/{id}/hard",
         },
+        "validation_endpoint": "/datasets/{key}/validate",
         "mcp_endpoint": "/mcp",
     }

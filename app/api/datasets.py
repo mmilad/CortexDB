@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -105,3 +106,46 @@ def get_dataset(
     if not data:
         raise HTTPException(status_code=404, detail="dataset not found")
     return DatasetRecord(**data)
+
+
+@router.delete(
+    "/datasets/{dataset_key}",
+    summary="Delete a dataset",
+    description=(
+        "Removes the dataset record from the registry. "
+        "Memory items belonging to the dataset are also deleted. "
+        "Relationships that reference this dataset key are NOT automatically removed."
+    ),
+)
+def delete_dataset(
+    dataset_key: str,
+    store: Annotated[SqliteStore, Depends(get_store)],
+) -> dict:
+    deleted = store.delete_dataset(dataset_key)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="dataset not found")
+    return {"deleted": dataset_key}
+
+
+@router.post(
+    "/datasets/{dataset_key}/validate",
+    response_model=DatasetRecord,
+    summary="Mark a dataset as validated",
+    description=(
+        "Stamps the dataset's last_validated_at field with the current UTC timestamp. "
+        "Call this after verifying the dataset metadata is consistent with the backing "
+        "table/view. Monitor last_validated_at to detect metadata drift over time."
+    ),
+)
+def validate_dataset(
+    dataset_key: str,
+    store: Annotated[SqliteStore, Depends(get_store)],
+) -> DatasetRecord:
+    data = store.get_dataset(dataset_key)
+    if not data:
+        raise HTTPException(status_code=404, detail="dataset not found")
+    rec = DatasetRecord(**data)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    updated = rec.model_copy(update={"last_validated_at": now_iso})
+    store.upsert_dataset(dataset_key, updated.model_dump())
+    return updated
