@@ -33,6 +33,42 @@ curl -X POST http://127.0.0.1:8000/datasets \
   }'
 ```
 
+Create a document-oriented dataset that declares vector retrieval (optional metadata fields):
+
+```bash
+curl -X POST http://127.0.0.1:8000/datasets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset_key": "documents",
+    "display_name": "Documents",
+    "schema_version": "v1",
+    "semantic_description": "Long-form documents and chunks for RAG",
+    "usage_guidance": "Use for semantic similarity over ingested document chunks",
+    "content_kind": "documents",
+    "retrieval_capabilities": ["vector", "filter_only"],
+    "capability_tags": ["rag", "documents"],
+    "relationship_hints": [],
+    "filterable_fields": ["source_id", "mime_type"],
+    "table_refs": [],
+    "retrieval_profiles": [{"name": "default_memory", "description": "Vector-heavy preset"}],
+    "metadata": {},
+    "status": "active"
+  }'
+```
+
+Discover whether an existing dataset fits, or get a suggested blueprint for `POST /datasets`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/datasets/discover \
+  -H "Content-Type: application/json" \
+  -d '{
+    "intent": "store engineering runbooks for semantic search",
+    "required_capabilities": ["vector"],
+    "content_kind": "documents",
+    "tag_filters": ["rag"]
+  }'
+```
+
 Create tool:
 
 ```bash

@@ -1,0 +1,1 @@
+"""CortexDB FastAPI application package."""
