@@ -192,11 +192,16 @@ class SqliteStore:
         return result
 
     def delete_dataset(self, key: str) -> bool:
-        cur = self._conn.execute(
-            "DELETE FROM datasets WHERE dataset_key = ?", (key,)
-        )
+        exists = self._conn.execute(
+            "SELECT 1 FROM datasets WHERE dataset_key = ?", (key,)
+        ).fetchone()
+        if not exists:
+            return False
+        # Hard-delete all memory items belonging to this dataset first.
+        self._conn.execute("DELETE FROM memory_items WHERE dataset_key = ?", (key,))
+        self._conn.execute("DELETE FROM datasets WHERE dataset_key = ?", (key,))
         self._conn.commit()
-        return cur.rowcount > 0
+        return True
 
     # ------------------------------------------------------------------
     # Tools

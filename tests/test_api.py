@@ -106,6 +106,20 @@ def test_delete_dataset(client):
     assert r3.status_code == 404
 
 
+def test_delete_dataset_cascades_items(client):
+    """Deleting a dataset removes its memory items from the store."""
+    r = client.post("/datasets", json={**DATASET_PAYLOAD, "dataset_key": "ds_with_items"})
+    assert r.status_code == 200
+    from app.store import get_store
+    store = get_store()
+    store.insert_memory_item({"id": "orphan1", "dataset_key": "ds_with_items", "raw_text": "x", "metadata": {}})
+    store.insert_memory_item({"id": "orphan2", "dataset_key": "ds_with_items", "raw_text": "y", "metadata": {}})
+    assert store.count_memory_items("ds_with_items") == 2
+    client.delete("/datasets/ds_with_items")
+    # After dataset delete, items must be gone too (no orphans)
+    assert store.count_memory_items("ds_with_items", include_deleted=True) == 0
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -312,6 +326,38 @@ def test_soft_delete_and_restore_via_list(client):
     r3 = client.get("/datasets/test_ds/items?include_deleted=true")
     ids_with = [i["id"] for i in r3.json()]
     assert "soft_del_test" in ids_with
+
+
+def test_soft_delete_idempotent_returns_404(client):
+    """Second soft-delete of the same item should return 404."""
+    from app.store import get_store
+    get_store().insert_memory_item({
+        "id": "double_del",
+        "dataset_key": "test_ds",
+        "raw_text": "delete me twice",
+        "metadata": {},
+    })
+    r1 = client.delete("/datasets/test_ds/items/double_del")
+    assert r1.status_code == 200
+    r2 = client.delete("/datasets/test_ds/items/double_del")
+    assert r2.status_code == 404
+
+
+def test_get_item_soft_deleted_returns_404(client):
+    """GET /items/{id} returns 404 for soft-deleted items by default."""
+    from app.store import get_store
+    get_store().insert_memory_item({
+        "id": "get_del_test",
+        "dataset_key": "test_ds",
+        "raw_text": "soft deleted item",
+        "metadata": {},
+    })
+    client.delete("/datasets/test_ds/items/get_del_test")
+    r = client.get("/datasets/test_ds/items/get_del_test")
+    assert r.status_code == 404
+    r2 = client.get("/datasets/test_ds/items/get_del_test?include_deleted=true")
+    assert r2.status_code == 200
+    assert r2.json()["is_deleted"] is True
 
 
 def test_hard_delete(client):

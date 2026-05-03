@@ -199,14 +199,23 @@ def list_items(
     "/datasets/{dataset_key}/items/{item_id}",
     response_model=MemoryItem,
     summary="Get a single memory item",
+    description=(
+        "Returns the item. Soft-deleted items return 404 unless include_deleted=true is passed."
+    ),
 )
 def get_item(
     dataset_key: str,
     item_id: str,
     store: Annotated[SqliteStore, Depends(get_store)],
+    include_deleted: bool = Query(
+        default=False,
+        description="When true, a soft-deleted item is returned instead of 404.",
+    ),
 ) -> MemoryItem:
     row = store.get_memory_item(item_id)
     if not row or row["dataset_key"] != dataset_key:
+        raise HTTPException(status_code=404, detail="item not found")
+    if row.get("is_deleted") and not include_deleted:
         raise HTTPException(status_code=404, detail="item not found")
     return _row_to_memory_item(row)
 
@@ -228,7 +237,9 @@ def delete_item(
     row = store.get_memory_item(item_id)
     if not row or row["dataset_key"] != dataset_key:
         raise HTTPException(status_code=404, detail="item not found")
-    store.soft_delete_memory_item(item_id)
+    deleted = store.soft_delete_memory_item(item_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="item not found or already deleted")
     return {"soft_deleted": item_id}
 
 

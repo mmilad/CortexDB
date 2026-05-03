@@ -67,6 +67,15 @@ def test_delete_dataset_missing(store):
     assert store.delete_dataset("nope") is False
 
 
+def test_delete_dataset_cascades_memory_items(store):
+    store.upsert_dataset("del_ds", {})
+    store.insert_memory_item({"id": "di1", "dataset_key": "del_ds", "raw_text": "a", "metadata": {}})
+    store.insert_memory_item({"id": "di2", "dataset_key": "del_ds", "raw_text": "b", "metadata": {}})
+    assert store.count_memory_items("del_ds") == 2
+    store.delete_dataset("del_ds")
+    assert store.count_memory_items("del_ds", include_deleted=True) == 0
+
+
 def test_dataset_embedding_roundtrip(store):
     store.upsert_dataset("e1", {})
     store.set_dataset_embedding("e1", "hello", [0.1, 0.2], "test/model")
