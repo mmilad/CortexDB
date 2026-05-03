@@ -76,6 +76,35 @@ def test_delete_dataset_cascades_memory_items(store):
     assert store.count_memory_items("del_ds", include_deleted=True) == 0
 
 
+def test_delete_dataset_cascades_relationships(store):
+    store.upsert_dataset("src_ds", {})
+    store.upsert_dataset("tgt_ds", {})
+    store.upsert_relationship({
+        "id": "edge1", "source_type": "dataset", "source_key": "src_ds",
+        "target_type": "dataset", "target_key": "tgt_ds",
+        "edge_type": "related", "join_fields": [], "description": "",
+    })
+    store.upsert_relationship({
+        "id": "edge2", "source_type": "dataset", "source_key": "other_ds",
+        "target_type": "dataset", "target_key": "src_ds",
+        "edge_type": "feeds_into", "join_fields": [], "description": "",
+    })
+    store.delete_dataset("src_ds")
+    assert store.get_relationship("edge1") is None
+    assert store.get_relationship("edge2") is None
+
+
+def test_delete_tool_cascades_relationships(store):
+    store.upsert_tool("my_tool", {})
+    store.upsert_relationship({
+        "id": "tedge1", "source_type": "tool", "source_key": "my_tool",
+        "target_type": "dataset", "target_key": "some_ds",
+        "edge_type": "consumes", "join_fields": [], "description": "",
+    })
+    store.delete_tool("my_tool")
+    assert store.get_relationship("tedge1") is None
+
+
 def test_dataset_embedding_roundtrip(store):
     store.upsert_dataset("e1", {})
     store.set_dataset_embedding("e1", "hello", [0.1, 0.2], "test/model")
@@ -253,7 +282,8 @@ def test_hybrid_search(store):
         "hs", query_vector=[1.0, 0.0], keyword_query="relevant", vector_weight=0.5, top_k=2
     )
     assert results[0]["id"] == "h1"
-    assert results[0]["keyword_score"] == 1.0
+    # BM25: h1 contains "relevant" → positive score; h2 does not → zero score
+    assert results[0]["keyword_score"] > 0.0
     assert results[1]["keyword_score"] == 0.0
 
 
@@ -272,3 +302,138 @@ def test_metadata_filter(store):
     )
     assert len(results) == 1
     assert results[0]["id"] == "mf1"
+
+
+# ---------------------------------------------------------------------------
+# BM25 keyword scoring
+# ---------------------------------------------------------------------------
+
+def test_bm25_keyword_only_positive_score(store):
+    """Items containing the query term receive a BM25 score > 0."""
+    from app.store import _bm25_score
+    items = [
+        {"id": "a", "raw_text": "the quick brown fox"},
+        {"id": "b", "raw_text": "lazy dog"},
+    ]
+    scored = _bm25_score(items, "fox")
+    a = next(i for i in scored if i["id"] == "a")
+    b = next(i for i in scored if i["id"] == "b")
+    assert a["keyword_score"] > 0.0
+    assert b["keyword_score"] == 0.0
+
+
+def test_bm25_multi_term(store):
+    """Multi-term queries accumulate IDF contributions."""
+    from app.store import _bm25_score
+    items = [
+        {"id": "a", "raw_text": "machine learning model training"},
+        {"id": "b", "raw_text": "machine learning inference"},
+        {"id": "c", "raw_text": "totally unrelated text here"},
+    ]
+    scored = _bm25_score(items, "machine learning training")
+    by_id = {i["id"]: i["keyword_score"] for i in scored}
+    # "a" has all three terms; "b" has two; "c" has none
+    assert by_id["a"] > by_id["b"] > by_id["c"]
+    assert by_id["c"] == 0.0
+
+
+def test_bm25_normalised_to_unit(store):
+    """BM25 normalized score must be in [0, 1]."""
+    from app.store import _bm25_score
+    items = [{"id": str(i), "raw_text": f"word{i} word{i} word{i}"} for i in range(10)]
+    scored = _bm25_score(items, "word0 word1 word2")
+    for it in scored:
+        assert 0.0 <= it["keyword_score"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# sqlite-vec ANN index
+# ---------------------------------------------------------------------------
+
+def test_vec_enabled_flag(store):
+    """Vec is enabled when sqlite-vec is installed."""
+    # sqlite-vec is installed in the dev environment
+    assert store.vec_enabled is True
+
+
+def test_vec_table_created_on_first_ingest(store):
+    """Inserting an item with an embedding creates the vec0 table."""
+    store.upsert_dataset("vec_ds", {})
+    store.insert_memory_item({
+        "id": "vv1", "dataset_key": "vec_ds", "raw_text": "hello",
+        "metadata": {}, "embedding": [1.0, 0.0, 0.0, 0.0], "embedding_model": "m",
+    })
+    assert store._vec_table_exists("vec_ds")
+    assert store._get_vec_dim("vec_ds") == 4
+
+
+def test_vec_search_returns_correct_order(store):
+    """ANN search via vec0 returns the nearest item first."""
+    store.upsert_dataset("vec_order", {})
+    store.insert_memory_item({
+        "id": "vo1", "dataset_key": "vec_order", "raw_text": "near",
+        "metadata": {}, "embedding": [1.0, 0.0], "embedding_model": "m",
+    })
+    store.insert_memory_item({
+        "id": "vo2", "dataset_key": "vec_order", "raw_text": "far",
+        "metadata": {}, "embedding": [0.0, 1.0], "embedding_model": "m",
+    })
+    results = store.search_memory_items("vec_order", query_vector=[1.0, 0.0], top_k=2)
+    assert results[0]["id"] == "vo1"
+    assert results[0]["score"] == pytest.approx(1.0, abs=1e-4)
+
+
+def test_vec_hard_delete_removes_vec_entry(store):
+    """Hard-deleting an item removes it from the vec0 table."""
+    from app.store import _vec_table_name
+    store.upsert_dataset("vec_del", {})
+    store.insert_memory_item({
+        "id": "vd1", "dataset_key": "vec_del", "raw_text": "to delete",
+        "metadata": {}, "embedding": [1.0, 0.0], "embedding_model": "m",
+    })
+    tbl = _vec_table_name("vec_del")
+    count_before = store._conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+    store.delete_memory_item("vd1")
+    count_after = store._conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+    assert count_before == 1
+    assert count_after == 0
+
+
+def test_vec_dataset_delete_drops_table(store):
+    """Deleting a dataset drops its vec0 table."""
+    from app.store import _vec_table_name
+    store.upsert_dataset("vec_drop", {})
+    store.insert_memory_item({
+        "id": "vdr1", "dataset_key": "vec_drop", "raw_text": "x",
+        "metadata": {}, "embedding": [1.0, 0.0], "embedding_model": "m",
+    })
+    assert store._vec_table_exists("vec_drop")
+    store.delete_dataset("vec_drop")
+    assert not store._vec_table_exists("vec_drop")
+
+
+def test_rebuild_vec_index(store):
+    """rebuild_vec_index repopulates the vec0 table from stored embeddings."""
+    from app.store import _vec_table_name
+    store.upsert_dataset("vec_rebuild", {})
+    store.insert_memory_item({
+        "id": "vrb1", "dataset_key": "vec_rebuild", "raw_text": "a",
+        "metadata": {}, "embedding": [1.0, 0.0], "embedding_model": "m",
+    })
+    store.insert_memory_item({
+        "id": "vrb2", "dataset_key": "vec_rebuild", "raw_text": "b",
+        "metadata": {}, "embedding": [0.0, 1.0], "embedding_model": "m",
+    })
+    # Manually drop the vec table to simulate corruption / first run
+    tbl = _vec_table_name("vec_rebuild")
+    store._conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+    store._conn.execute("UPDATE datasets SET vec_dim = NULL WHERE dataset_key = 'vec_rebuild'")
+    store._conn.commit()
+    assert not store._vec_table_exists("vec_rebuild")
+
+    count = store.rebuild_vec_index("vec_rebuild")
+    assert count == 2
+    assert store._vec_table_exists("vec_rebuild")
+    # Confirm search works after rebuild
+    results = store.search_memory_items("vec_rebuild", query_vector=[1.0, 0.0], top_k=2)
+    assert results[0]["id"] == "vrb1"

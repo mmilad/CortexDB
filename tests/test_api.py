@@ -116,8 +116,38 @@ def test_delete_dataset_cascades_items(client):
     store.insert_memory_item({"id": "orphan2", "dataset_key": "ds_with_items", "raw_text": "y", "metadata": {}})
     assert store.count_memory_items("ds_with_items") == 2
     client.delete("/datasets/ds_with_items")
-    # After dataset delete, items must be gone too (no orphans)
     assert store.count_memory_items("ds_with_items", include_deleted=True) == 0
+
+
+def test_delete_dataset_cascades_relationships(client):
+    """Deleting a dataset removes relationships that reference it."""
+    client.post("/datasets", json={**DATASET_PAYLOAD, "dataset_key": "cascade_src"})
+    client.post("/datasets", json={**DATASET_PAYLOAD, "dataset_key": "cascade_tgt"})
+    r_rel = client.post("/relationships", json={
+        "id": "cascade_edge",
+        "source_type": "dataset", "source_key": "cascade_src",
+        "target_type": "dataset", "target_key": "cascade_tgt",
+        "edge_type": "related",
+    })
+    assert r_rel.status_code == 200
+    client.delete("/datasets/cascade_src")
+    r_check = client.get("/relationships/cascade_edge")
+    assert r_check.status_code == 404
+
+
+def test_delete_tool_cascades_relationships(client):
+    """Deleting a tool removes relationships that reference it."""
+    client.post("/tools", json={**TOOL_PAYLOAD, "tool_key": "cascade_tool"})
+    r_rel = client.post("/relationships", json={
+        "id": "tool_cascade_edge",
+        "source_type": "tool", "source_key": "cascade_tool",
+        "target_type": "dataset", "target_key": "test_ds",
+        "edge_type": "consumes",
+    })
+    assert r_rel.status_code == 200
+    client.delete("/tools/cascade_tool")
+    r_check = client.get("/relationships/tool_cascade_edge")
+    assert r_check.status_code == 404
 
 
 # ---------------------------------------------------------------------------

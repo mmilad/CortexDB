@@ -113,8 +113,7 @@ def get_dataset(
     summary="Delete a dataset",
     description=(
         "Removes the dataset record from the registry. "
-        "Memory items belonging to the dataset are also deleted. "
-        "Relationships that reference this dataset key are NOT automatically removed."
+        "Memory items and relationships referencing this dataset key are also deleted."
     ),
 )
 def delete_dataset(

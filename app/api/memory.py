@@ -310,10 +310,14 @@ def re_embed_dataset(
             except Exception:
                 failed += 1
 
+    # Rebuild the ANN index now that embeddings (and possibly the dimension) have changed.
+    vec_indexed = store.rebuild_vec_index(dataset_key)
+
     return {
         "dataset_key": dataset_key,
         "embedding_model": model_id,
         "total_items": len(items),
         "updated": updated,
         "failed": failed,
+        "vec_indexed": vec_indexed,
     }

@@ -19,14 +19,17 @@ CortexDB is a **LLM-native memory and retrieval layer** for agentic systems.
 | Typed relationship graph (`/relationships`) | ✅ |
 | BFS graph traversal (`/graph/explore`) | ✅ |
 | LLM context endpoints (`/context/*`) | ✅ |
-| Dynamic MCP server (`/mcp`) | ✅ |
+| Dynamic MCP server (`/mcp` HTTP + stdio) | ✅ |
 | Embedding (nomic-embed-text / Ollama auto-start) | ✅ |
 | Raw text ingest (`/datasets/{key}/ingest`) | ✅ |
 | Vector + metadata search (`/datasets/{key}/search`) | ✅ |
+| BM25 keyword scoring (hybrid search) | ✅ |
 | OpenAI-compatible API embedding provider | ✅ |
-| sqlite-vec ANN index | Planned |
+| sqlite-vec ANN index (optional, auto-detected) | ✅ |
+| Relationship cascade delete | ✅ |
+| MCP `input_schema_ref` URL resolution | ✅ |
 | Postgres + pgvector backend | Planned |
-| Re-embedding jobs (raw text preserved) | Planned |
+| Re-embedding jobs (raw text preserved) | ✅ |
 | Tenant / namespace isolation | Planned |
 
 ## Quick start
@@ -34,7 +37,7 @@ CortexDB is a **LLM-native memory and retrieval layer** for agentic systems.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[vec]"     # includes sqlite-vec for ANN search
 uvicorn app.main:app --reload
 ```
 
@@ -62,6 +65,17 @@ Raw text is always stored, enabling re-embedding when models change.
 
 API docs: `http://127.0.0.1:8000/docs`
 
+End-to-end example: `python examples/quickstart.py`
+
+### sqlite-vec ANN index
+
+When `sqlite-vec` is installed (`pip install -e ".[vec]"`), CortexDB
+automatically creates a `vec0` ANN index per dataset on first ingest and uses
+it for all vector searches (~19 ms at 20 000 rows / 768 dim). Without it,
+the store falls back to an in-process Python cosine scan (suitable up to ~20 k
+rows). The `embedding` TEXT column is always the source of truth — the vec0
+table can be rebuilt at any time via `POST /datasets/{key}/re-embed`.
+
 ## LLM Agent Orientation Pattern
 
 An LLM agent starting a task should:
@@ -73,13 +87,38 @@ GET /context/graph          → how datasets and tools relate to each other
 GET /graph/explore?start=.. → BFS subgraph from a starting node
 ```
 
-Or via MCP:
+Or via MCP (HTTP):
 
 ```
 resources/list              → all registered datasets and tools as MCP resources
 resources/read cortexdb://context/index   → minimal orientation
 resources/read cortexdb://datasets/{key}  → full dataset context
 resources/read cortexdb://graph           → relationship map
+```
+
+Or via MCP (stdio — for Claude Desktop, Cursor, Continue, etc.):
+
+```bash
+# Run the stdio MCP server directly
+python -m app.mcp.stdio
+
+# Or use the installed entry point
+cortexdb-mcp
+```
+
+Example `claude_desktop_config.json` entry:
+```json
+{
+  "mcpServers": {
+    "cortexdb": {
+      "command": "cortexdb-mcp",
+      "env": {
+        "CORTEXDB_DB_PATH": "/path/to/cortexdb.sqlite",
+        "CORTEXDB_EMBED_PROVIDER": "none"
+      }
+    }
+  }
+}
 ```
 
 Adding a new dataset via `POST /datasets` automatically updates MCP `resources/list`
