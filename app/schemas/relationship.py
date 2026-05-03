@@ -18,7 +18,10 @@ EdgeType = Literal[
 
 
 class RelationshipRecord(BaseModel):
-    id: str = Field(..., description="Stable relationship identifier (caller-assigned or UUID).")
+    id: str = Field(
+        default="",
+        description="Stable relationship identifier. Auto-generated UUID when omitted.",
+    )
     source_type: NodeType = Field(..., description="Type of the source node.")
     source_key: str = Field(..., description="dataset_key or tool_key of the source node.")
     target_type: NodeType = Field(..., description="Type of the target node.")

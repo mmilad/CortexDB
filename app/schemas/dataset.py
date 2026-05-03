@@ -107,6 +107,14 @@ class DatasetRecord(BaseModel):
         description="Physical table or view names when backed by a store.",
     )
     retrieval_profiles: list[RetrievalProfile] = Field(default_factory=list)
+    last_validated_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO-8601 timestamp of the last time this dataset's schema was verified "
+            "against the actual backing table/view. Set via POST /datasets/{key}/validate. "
+            "Monitor this to catch metadata drift."
+        ),
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Caller-defined extension; not interpreted by CortexDB.",

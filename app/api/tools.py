@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.schemas.tool import ToolRecord
-from app.state import RegistryState, get_registry
+from app.store import SqliteStore, get_store
 
 router = APIRouter(tags=["tools"])
 
@@ -11,25 +11,40 @@ router = APIRouter(tags=["tools"])
 @router.post("/tools", response_model=ToolRecord)
 def upsert_tool(
     record: ToolRecord,
-    reg: Annotated[RegistryState, Depends(get_registry)],
+    store: Annotated[SqliteStore, Depends(get_store)],
 ) -> ToolRecord:
-    reg.tools[record.tool_key] = record.model_dump()
+    store.upsert_tool(record.tool_key, record.model_dump())
     return record
 
 
 @router.get("/tools", response_model=list[ToolRecord])
 def list_tools(
-    reg: Annotated[RegistryState, Depends(get_registry)],
+    store: Annotated[SqliteStore, Depends(get_store)],
 ) -> list[ToolRecord]:
-    return [ToolRecord(**t) for t in reg.tools.values()]
+    return [ToolRecord(**t) for t in store.list_tools().values()]
 
 
 @router.get("/tools/{tool_key}", response_model=ToolRecord)
 def get_tool(
     tool_key: str,
-    reg: Annotated[RegistryState, Depends(get_registry)],
+    store: Annotated[SqliteStore, Depends(get_store)],
 ) -> ToolRecord:
-    tool = reg.tools.get(tool_key)
-    if not tool:
+    data = store.get_tool(tool_key)
+    if not data:
         raise HTTPException(status_code=404, detail="tool not found")
-    return ToolRecord(**tool)
+    return ToolRecord(**data)
+
+
+@router.delete(
+    "/tools/{tool_key}",
+    summary="Delete a tool",
+    description="Removes the tool record from the registry.",
+)
+def delete_tool(
+    tool_key: str,
+    store: Annotated[SqliteStore, Depends(get_store)],
+) -> dict:
+    deleted = store.delete_tool(tool_key)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="tool not found")
+    return {"deleted": tool_key}

@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
 from app.schemas.dataset import DatasetRecord
@@ -53,7 +53,7 @@ from app.store import SqliteStore, get_store
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "cortexdb", "version": "0.2.0"}
+SERVER_INFO = {"name": "cortexdb", "version": "0.3.0"}
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +368,14 @@ def _handle_ping(params: dict, store: SqliteStore) -> dict:
     return {}
 
 
+def _handle_notifications_initialized(params: dict, store: SqliteStore) -> dict:
+    """No-op acknowledgement for the MCP post-handshake notification."""
+    return {}
+
+
 _HANDLERS = {
     "initialize": _handle_initialize,
+    "notifications/initialized": _handle_notifications_initialized,
     "resources/list": _handle_resources_list,
     "resources/read": _handle_resources_read,
     "tools/list": _handle_tools_list,
@@ -408,14 +414,25 @@ async def mcp_endpoint(
     method = body.get("method", "")
     params = body.get("params") or {}
 
+    # MCP notifications have no "id" — they are fire-and-forget; return 202.
+    is_notification = "id" not in body
+
     handler = _HANDLERS.get(method)
     if handler is None:
+        if is_notification:
+            return Response(status_code=202)
         return JSONResponse(_err(-32601, f"Method not found: {method}", req_id))
 
     try:
         result = handler(params, store)
+        if is_notification:
+            return Response(status_code=202)
         return JSONResponse(_ok(result, req_id))
     except ValueError as exc:
+        if is_notification:
+            return Response(status_code=202)
         return JSONResponse(_err(-32602, str(exc), req_id))
     except Exception as exc:
+        if is_notification:
+            return Response(status_code=202)
         return JSONResponse(_err(-32603, f"Internal error: {exc}", req_id), status_code=500)

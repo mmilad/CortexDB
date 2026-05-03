@@ -29,6 +29,8 @@ def upsert_relationship(
 ) -> RelationshipRecord:
     if not record.id:
         record = record.model_copy(update={"id": str(uuid.uuid4())})
+    # Guard: an auto-generated default should always produce a non-empty id above.
+    assert record.id
     store.upsert_relationship(record.model_dump())
     saved = store.get_relationship(record.id)
     return RelationshipRecord(**saved)

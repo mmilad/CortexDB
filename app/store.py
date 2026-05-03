@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS memory_items (
     metadata        TEXT NOT NULL DEFAULT '{}',
     embedding       TEXT,
     embedding_model TEXT,
+    is_deleted      INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (dataset_key) REFERENCES datasets(dataset_key)
 );
@@ -71,6 +72,7 @@ _MIGRATIONS = [
     "ALTER TABLE datasets ADD COLUMN embedding       TEXT",
     "ALTER TABLE datasets ADD COLUMN embedding_model TEXT",
     "ALTER TABLE datasets ADD COLUMN embedded_at     TEXT",
+    "ALTER TABLE memory_items ADD COLUMN is_deleted  INTEGER NOT NULL DEFAULT 0",
 ]
 
 
@@ -314,7 +316,8 @@ class SqliteStore:
                  raw_text        = excluded.raw_text,
                  metadata        = excluded.metadata,
                  embedding       = excluded.embedding,
-                 embedding_model = excluded.embedding_model""",
+                 embedding_model = excluded.embedding_model,
+                 is_deleted      = 0""",
             {
                 "id": item["id"],
                 "dataset_key": item["dataset_key"],
@@ -331,12 +334,13 @@ class SqliteStore:
         dataset_key: str,
         limit: int = 100,
         offset: int = 0,
+        include_deleted: bool = False,
     ) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM memory_items WHERE dataset_key = ? "
-            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (dataset_key, limit, offset),
-        ).fetchall()
+        base = "SELECT * FROM memory_items WHERE dataset_key = ?"
+        if not include_deleted:
+            base += " AND is_deleted = 0"
+        base += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        rows = self._conn.execute(base, (dataset_key, limit, offset)).fetchall()
         return [self._row_to_item(r) for r in rows]
 
     def get_memory_item(self, item_id: str) -> dict[str, Any] | None:
@@ -345,7 +349,16 @@ class SqliteStore:
         ).fetchone()
         return self._row_to_item(row) if row else None
 
+    def soft_delete_memory_item(self, item_id: str) -> bool:
+        cur = self._conn.execute(
+            "UPDATE memory_items SET is_deleted = 1 WHERE id = ? AND is_deleted = 0",
+            (item_id,),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
     def delete_memory_item(self, item_id: str) -> bool:
+        """Hard delete — permanently removes the row."""
         cur = self._conn.execute("DELETE FROM memory_items WHERE id = ?", (item_id,))
         self._conn.commit()
         return cur.rowcount > 0
@@ -353,49 +366,113 @@ class SqliteStore:
     def search_memory_items(
         self,
         dataset_key: str,
-        query_vector: list[float],
+        query_vector: list[float] | None,
         top_k: int = 10,
         metadata_filters: dict[str, Any] | None = None,
+        keyword_query: str | None = None,
+        vector_weight: float = 1.0,
     ) -> list[dict[str, Any]]:
-        """Cosine similarity search over memory items.
+        """Hybrid search over memory items: vector + optional keyword blending.
 
-        Loads all items for the dataset (with embeddings) into memory,
-        computes cosine similarity in Python, returns top-k sorted by score.
+        Scoring modes:
+          vector only  (keyword_query=None):  score = cosine_similarity
+          keyword only (query_vector=None):   score = 1.0 if keyword matches, else item excluded
+          hybrid       (both provided):       score = vector_weight * vector_score
+                                                    + (1 - vector_weight) * keyword_score
 
-        This is correct and fast for up to ~50k items. For larger corpora,
-        replace with sqlite-vec ANN index (extension is optional and auto-detected).
+        Items without an embedding are included only in keyword-only mode.
+        In hybrid mode items without an embedding receive vector_score=0.
+
+        Fast for up to ~50k items (Python in-process). Replace with sqlite-vec
+        ANN index for larger corpora.
         """
-        rows = self._conn.execute(
-            "SELECT * FROM memory_items WHERE dataset_key = ? AND embedding IS NOT NULL",
-            (dataset_key,),
-        ).fetchall()
+        require_embedding = query_vector is not None and keyword_query is None
 
+        if require_embedding:
+            rows = self._conn.execute(
+                "SELECT * FROM memory_items "
+                "WHERE dataset_key = ? AND embedding IS NOT NULL AND is_deleted = 0",
+                (dataset_key,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM memory_items WHERE dataset_key = ? AND is_deleted = 0",
+                (dataset_key,),
+            ).fetchall()
+
+        kw_lower = keyword_query.lower() if keyword_query else None
         scored = []
+
         for row in rows:
             item = self._row_to_item(row)
 
-            # Apply metadata filters if provided
             if metadata_filters:
                 meta = item.get("metadata", {})
                 if not all(meta.get(k) == v for k, v in metadata_filters.items()):
                     continue
 
-            vec = item.pop("_embedding_raw", None)
-            if vec is None:
+            raw_vec = item.pop("_embedding_raw", None)
+
+            # Compute keyword score
+            kw_score: float | None = None
+            if kw_lower is not None:
+                kw_score = 1.0 if kw_lower in item.get("raw_text", "").lower() else 0.0
+                if kw_score == 0.0 and query_vector is None:
+                    continue  # keyword-only mode: exclude non-matching items
+
+            # Compute vector score
+            vec_score: float | None = None
+            if query_vector is not None:
+                if raw_vec is not None:
+                    vec_score = round(cosine_similarity(query_vector, raw_vec), 6)
+                else:
+                    vec_score = 0.0
+
+            # Blend
+            if vec_score is not None and kw_score is not None:
+                final = vector_weight * vec_score + (1.0 - vector_weight) * kw_score
+            elif vec_score is not None:
+                final = vec_score
+            elif kw_score is not None:
+                final = kw_score
+            else:
                 continue
-            sim = cosine_similarity(query_vector, vec)
-            item["score"] = round(sim, 6)
+
+            item["score"] = round(final, 6)
+            item["vector_score"] = vec_score
+            item["keyword_score"] = kw_score
             scored.append(item)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:top_k]
 
-    def count_memory_items(self, dataset_key: str) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) as n FROM memory_items WHERE dataset_key = ?",
-            (dataset_key,),
-        ).fetchone()
+    def count_memory_items(self, dataset_key: str, include_deleted: bool = False) -> int:
+        base = "SELECT COUNT(*) as n FROM memory_items WHERE dataset_key = ?"
+        if not include_deleted:
+            base += " AND is_deleted = 0"
+        row = self._conn.execute(base, (dataset_key,)).fetchone()
         return row["n"] if row else 0
+
+    def list_all_memory_items(self, dataset_key: str) -> list[dict[str, Any]]:
+        """Return all non-deleted items for a dataset (including those without embeddings)."""
+        rows = self._conn.execute(
+            "SELECT * FROM memory_items WHERE dataset_key = ? AND is_deleted = 0 "
+            "ORDER BY created_at ASC",
+            (dataset_key,),
+        ).fetchall()
+        return [self._row_to_item(r) for r in rows]
+
+    def update_memory_item_embedding(
+        self,
+        item_id: str,
+        embedding: list[float],
+        model_id: str,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE memory_items SET embedding = ?, embedding_model = ? WHERE id = ?",
+            (json.dumps(embedding), model_id, item_id),
+        )
+        self._conn.commit()
 
     @staticmethod
     def _row_to_item(row: sqlite3.Row) -> dict[str, Any]:
@@ -404,6 +481,8 @@ class SqliteStore:
         # Store raw embedding separately for search; strip from public dict
         raw_emb = d.pop("embedding", None)
         d["_embedding_raw"] = json.loads(raw_emb) if raw_emb else None
+        # Normalise is_deleted to bool
+        d["is_deleted"] = bool(d.get("is_deleted", 0))
         return d
 
 
