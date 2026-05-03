@@ -20,9 +20,14 @@ CortexDB is a **LLM-native memory and retrieval layer** for agentic systems.
 | BFS graph traversal (`/graph/explore`) | ✅ |
 | LLM context endpoints (`/context/*`) | ✅ |
 | Dynamic MCP server (`/mcp`) | ✅ |
-| Vector / hybrid retrieval | Planned |
+| Embedding (nomic-embed-text / Ollama auto-start) | ✅ |
+| Raw text ingest (`/datasets/{key}/ingest`) | ✅ |
+| Vector + metadata search (`/datasets/{key}/search`) | ✅ |
+| OpenAI-compatible API embedding provider | ✅ |
+| sqlite-vec ANN index | Planned |
+| Postgres + pgvector backend | Planned |
+| Re-embedding jobs (raw text preserved) | Planned |
 | Tenant / namespace isolation | Planned |
-| Re-embedding jobs | Planned |
 
 ## Quick start
 
@@ -34,7 +39,26 @@ uvicorn app.main:app --reload
 ```
 
 Storage: `cortexdb.sqlite` in the working directory.
-Override: `CORTEXDB_DB_PATH=/path/to/file.sqlite uvicorn app.main:app --reload`
+Override: `CORTEXDB_DB_PATH=/path/to/file.sqlite`
+
+Embedding defaults to **nomic-embed-text via Ollama**. On startup CortexDB
+checks if Ollama is running; if not, it starts `ollama serve` and pulls the
+model automatically. To use a different provider:
+
+```bash
+# Any OpenAI-compatible embedding API
+CORTEXDB_EMBED_PROVIDER=api \
+CORTEXDB_EMBED_URL=https://api.openai.com \
+CORTEXDB_EMBED_MODEL=text-embedding-3-small \
+CORTEXDB_EMBED_API_KEY=sk-... \
+uvicorn app.main:app --reload
+
+# Disable embedding entirely
+CORTEXDB_EMBED_PROVIDER=none uvicorn app.main:app --reload
+```
+
+Callers **never send vectors** — only raw text. CortexDB handles vectorization.
+Raw text is always stored, enabling re-embedding when models change.
 
 API docs: `http://127.0.0.1:8000/docs`
 

@@ -12,6 +12,15 @@ from app.schemas.discovery import (
     DatasetDiscoverRequest,
     DatasetDiscoverResponse,
 )
+from app.schemas.memory import (
+    IngestItem,
+    IngestRequest,
+    IngestResult,
+    MemoryItem,
+    SearchHit,
+    SearchRequest,
+    SearchResponse,
+)
 from app.schemas.relationship import (
     EdgeType,
     GraphEdge,
@@ -34,11 +43,18 @@ __all__ = [
     "GraphEdge",
     "GraphExploreResponse",
     "GraphNode",
+    "IngestItem",
+    "IngestRequest",
+    "IngestResult",
+    "MemoryItem",
     "NodeType",
     "QueryExample",
     "RelationshipRecord",
     "RetrievalCapability",
     "RetrievalProfile",
+    "SearchHit",
+    "SearchRequest",
+    "SearchResponse",
     "ToolQueryExample",
     "ToolRecord",
 ]

@@ -1,4 +1,16 @@
-"""Deterministic dataset discovery (no internal LLM or embedding similarity in v1)."""
+"""Deterministic dataset discovery with optional vector similarity boost.
+
+Scoring when embedding is available:
+  final_score = 0.6 * vector_score        (cosine similarity, 0-1 range → scaled ×20)
+              + deterministic_score        (capabilities, tags, token overlap)
+
+Scoring without embedding (fallback, v1 behaviour):
+  final_score = deterministic_score only
+
+The deterministic component ensures capability hard-filters still apply
+and prevents semantically irrelevant but vector-adjacent datasets from
+bubbling to the top.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +25,9 @@ from app.schemas.discovery import (
     DatasetDiscoverRequest,
     DatasetDiscoverResponse,
 )
+from app.store import SqliteStore, cosine_similarity
+
+_VECTOR_WEIGHT = 20.0  # scale cosine (0-1) to be comparable to deterministic scores
 
 
 def _tokens(text: str) -> set[str]:
@@ -26,13 +41,14 @@ def _intent_slug(intent: str) -> str:
     return f"{base}_{uuid.uuid4().hex[:8]}"
 
 
-def score_dataset(
+def _deterministic_score(
     dataset: DatasetRecord,
     intent: str,
     required_capabilities: list[str],
     content_kind: str | None,
     tag_filters: list[str],
 ) -> tuple[float, list[str]]:
+    """Capability + tag + token-overlap scoring (no vectors)."""
     reasons: list[str] = []
     score = 0.0
 
@@ -52,6 +68,8 @@ def score_dataset(
     intent_toks = _tokens(intent)
     if intent_toks:
         blob = f"{dataset.semantic_description} {dataset.usage_guidance}"
+        if dataset.llm_summary:
+            blob += f" {dataset.llm_summary}"
         text_toks = _tokens(blob)
         overlap = len(intent_toks & text_toks)
         if overlap:
@@ -86,22 +104,55 @@ def _parse_content_kind(value: str | None) -> ContentKind:
 
 def discover_datasets(
     request: DatasetDiscoverRequest,
-    datasets: dict[str, dict[str, Any]],
+    store: SqliteStore,
+    intent_vector: list[float] | None = None,
 ) -> DatasetDiscoverResponse:
-    loaded = [DatasetRecord(**d) for d in datasets.values()]
+    """Discover matching datasets with optional vector similarity boost.
+
+    Parameters
+    ----------
+    request:       Discovery request with intent and filters.
+    store:         SqliteStore instance.
+    intent_vector: Pre-computed embedding of request.intent.
+                   Pass None to use deterministic-only scoring (v1 fallback).
+    """
+    datasets_raw = store.list_datasets()
+    loaded = [DatasetRecord(**d) for d in datasets_raw.values()]
+
+    # Load stored embeddings if we have an intent vector
+    dataset_vectors: dict[str, list[float]] = {}
+    if intent_vector is not None:
+        for row in store.list_datasets_with_embeddings():
+            dataset_vectors[row["dataset_key"]] = row["embedding"]
+
     candidates: list[DatasetCandidate] = []
 
     for ds in loaded:
         if not _meets_requirements(ds, request.required_capabilities):
             continue
-        s, reasons = score_dataset(
+
+        det_score, reasons = _deterministic_score(
             ds,
             request.intent,
             request.required_capabilities,
             request.content_kind,
             request.tag_filters,
         )
-        candidates.append(DatasetCandidate(dataset=ds, score=s, reasons=reasons))
+
+        # Abort early if hard capability filter failed
+        if any(r.startswith("missing_capabilities:") for r in reasons):
+            continue
+
+        total_score = det_score
+
+        # Blend in vector score if available for this dataset
+        if intent_vector is not None and ds.dataset_key in dataset_vectors:
+            sim = cosine_similarity(intent_vector, dataset_vectors[ds.dataset_key])
+            vec_contrib = sim * _VECTOR_WEIGHT
+            total_score += vec_contrib
+            reasons.append(f"vector_similarity:{sim:.4f}")
+
+        candidates.append(DatasetCandidate(dataset=ds, score=total_score, reasons=reasons))
 
     candidates.sort(key=lambda c: c.score, reverse=True)
 
@@ -112,6 +163,7 @@ def discover_datasets(
         return any(
             r.startswith("text_token_overlap:")
             or r.startswith("tag_match:")
+            or r.startswith("vector_similarity:")
             or r == "content_kind_match"
             for r in reasons
         )
@@ -119,7 +171,6 @@ def discover_datasets(
     use_existing = False
     if top is not None and top.score >= score_threshold:
         if request.required_capabilities:
-            # Capability match alone is weak; require intent overlap, tags, or kind.
             use_existing = _has_relevance_signals(top.reasons)
         else:
             use_existing = True
@@ -151,3 +202,14 @@ def discover_datasets(
         recommended_action="use_existing" if use_existing else "create_new",
         suggested_blueprint=blueprint,
     )
+
+
+# Kept for backward-compat with any direct callers of the old signature
+def score_dataset(
+    dataset: DatasetRecord,
+    intent: str,
+    required_capabilities: list[str],
+    content_kind: str | None,
+    tag_filters: list[str],
+) -> tuple[float, list[str]]:
+    return _deterministic_score(dataset, intent, required_capabilities, content_kind, tag_filters)
