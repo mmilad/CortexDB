@@ -228,6 +228,70 @@ def test_hard_delete(store):
     assert store.get_memory_item("mc") is None
 
 
+def test_hard_delete_missing_returns_false(store):
+    """delete_memory_item returns False when the item does not exist."""
+    assert store.delete_memory_item("does-not-exist") is False
+
+
+def test_hard_delete_cascades_relationships(store):
+    """Hard-deleting an item must cascade-delete edges that reference it."""
+    store.upsert_dataset("cascade_ds", {})
+    store.upsert_dataset("other_ds", {})
+    store.insert_memory_item({"id": "ci_item", "dataset_key": "cascade_ds", "raw_text": "x", "metadata": {}})
+
+    store.upsert_relationship({
+        "id": "ci_edge1", "source_type": "memory_item", "source_key": "ci_item",
+        "target_type": "dataset", "target_key": "other_ds",
+        "edge_type": "related", "join_fields": [], "description": "",
+    })
+    store.upsert_relationship({
+        "id": "ci_edge2", "source_type": "dataset", "source_key": "cascade_ds",
+        "target_type": "memory_item", "target_key": "ci_item",
+        "edge_type": "contains", "join_fields": [], "description": "",
+    })
+    # Edge unrelated to ci_item — must survive.
+    store.upsert_relationship({
+        "id": "ci_edge3", "source_type": "dataset", "source_key": "cascade_ds",
+        "target_type": "dataset", "target_key": "other_ds",
+        "edge_type": "feeds_into", "join_fields": [], "description": "",
+    })
+
+    assert store.delete_memory_item("ci_item") is True
+    assert store.get_relationship("ci_edge1") is None
+    assert store.get_relationship("ci_edge2") is None
+    assert store.get_relationship("ci_edge3") is not None
+
+
+def test_soft_delete_preserves_relationships(store):
+    """Soft-deleting an item must NOT delete its relationships (item is recoverable)."""
+    store.upsert_dataset("soft_ds", {})
+    store.upsert_dataset("soft_other", {})
+    store.insert_memory_item({"id": "soft_item", "dataset_key": "soft_ds", "raw_text": "y", "metadata": {}})
+    store.upsert_relationship({
+        "id": "soft_edge", "source_type": "memory_item", "source_key": "soft_item",
+        "target_type": "dataset", "target_key": "soft_other",
+        "edge_type": "related", "join_fields": [], "description": "",
+    })
+
+    assert store.soft_delete_memory_item("soft_item") is True
+    assert store.get_relationship("soft_edge") is not None
+
+
+def test_delete_dataset_cascades_item_relationships(store):
+    """Deleting a dataset must also remove relationships owned by its memory items."""
+    store.upsert_dataset("item_rel_ds", {})
+    store.upsert_dataset("peer_ds", {})
+    store.insert_memory_item({"id": "ir_item", "dataset_key": "item_rel_ds", "raw_text": "z", "metadata": {}})
+    store.upsert_relationship({
+        "id": "ir_edge", "source_type": "memory_item", "source_key": "ir_item",
+        "target_type": "dataset", "target_key": "peer_ds",
+        "edge_type": "related", "join_fields": [], "description": "",
+    })
+
+    store.delete_dataset("item_rel_ds")
+    assert store.get_relationship("ir_edge") is None
+
+
 def test_count_items(store):
     store.upsert_dataset("ds", {})
     for i in range(3):
@@ -310,12 +374,12 @@ def test_metadata_filter(store):
 
 def test_bm25_keyword_only_positive_score(store):
     """Items containing the query term receive a BM25 score > 0."""
-    from app.store import _bm25_score
+    from app.store.search import bm25_score
     items = [
         {"id": "a", "raw_text": "the quick brown fox"},
         {"id": "b", "raw_text": "lazy dog"},
     ]
-    scored = _bm25_score(items, "fox")
+    scored = bm25_score(items, "fox")
     a = next(i for i in scored if i["id"] == "a")
     b = next(i for i in scored if i["id"] == "b")
     assert a["keyword_score"] > 0.0
@@ -324,13 +388,13 @@ def test_bm25_keyword_only_positive_score(store):
 
 def test_bm25_multi_term(store):
     """Multi-term queries accumulate IDF contributions."""
-    from app.store import _bm25_score
+    from app.store.search import bm25_score
     items = [
         {"id": "a", "raw_text": "machine learning model training"},
         {"id": "b", "raw_text": "machine learning inference"},
         {"id": "c", "raw_text": "totally unrelated text here"},
     ]
-    scored = _bm25_score(items, "machine learning training")
+    scored = bm25_score(items, "machine learning training")
     by_id = {i["id"]: i["keyword_score"] for i in scored}
     # "a" has all three terms; "b" has two; "c" has none
     assert by_id["a"] > by_id["b"] > by_id["c"]
@@ -339,9 +403,9 @@ def test_bm25_multi_term(store):
 
 def test_bm25_normalised_to_unit(store):
     """BM25 normalized score must be in [0, 1]."""
-    from app.store import _bm25_score
+    from app.store.search import bm25_score
     items = [{"id": str(i), "raw_text": f"word{i} word{i} word{i}"} for i in range(10)]
-    scored = _bm25_score(items, "word0 word1 word2")
+    scored = bm25_score(items, "word0 word1 word2")
     for it in scored:
         assert 0.0 <= it["keyword_score"] <= 1.0
 
@@ -363,8 +427,9 @@ def test_vec_table_created_on_first_ingest(store):
         "id": "vv1", "dataset_key": "vec_ds", "raw_text": "hello",
         "metadata": {}, "embedding": [1.0, 0.0, 0.0, 0.0], "embedding_model": "m",
     })
-    assert store._vec_table_exists("vec_ds")
-    assert store._get_vec_dim("vec_ds") == 4
+    from app.store.vec import table_exists, get_dim
+    assert table_exists(store._conn, "vec_ds")
+    assert get_dim(store._conn, "vec_ds") == 4
 
 
 def test_vec_search_returns_correct_order(store):
@@ -385,13 +450,13 @@ def test_vec_search_returns_correct_order(store):
 
 def test_vec_hard_delete_removes_vec_entry(store):
     """Hard-deleting an item removes it from the vec0 table."""
-    from app.store import _vec_table_name
+    from app.store.vec import vec_table_name
     store.upsert_dataset("vec_del", {})
     store.insert_memory_item({
         "id": "vd1", "dataset_key": "vec_del", "raw_text": "to delete",
         "metadata": {}, "embedding": [1.0, 0.0], "embedding_model": "m",
     })
-    tbl = _vec_table_name("vec_del")
+    tbl = vec_table_name("vec_del")
     count_before = store._conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
     store.delete_memory_item("vd1")
     count_after = store._conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
@@ -401,20 +466,20 @@ def test_vec_hard_delete_removes_vec_entry(store):
 
 def test_vec_dataset_delete_drops_table(store):
     """Deleting a dataset drops its vec0 table."""
-    from app.store import _vec_table_name
+    from app.store.vec import table_exists
     store.upsert_dataset("vec_drop", {})
     store.insert_memory_item({
         "id": "vdr1", "dataset_key": "vec_drop", "raw_text": "x",
         "metadata": {}, "embedding": [1.0, 0.0], "embedding_model": "m",
     })
-    assert store._vec_table_exists("vec_drop")
+    assert table_exists(store._conn, "vec_drop")
     store.delete_dataset("vec_drop")
-    assert not store._vec_table_exists("vec_drop")
+    assert not table_exists(store._conn, "vec_drop")
 
 
 def test_rebuild_vec_index(store):
     """rebuild_vec_index repopulates the vec0 table from stored embeddings."""
-    from app.store import _vec_table_name
+    from app.store.vec import table_exists, vec_table_name
     store.upsert_dataset("vec_rebuild", {})
     store.insert_memory_item({
         "id": "vrb1", "dataset_key": "vec_rebuild", "raw_text": "a",
@@ -424,16 +489,15 @@ def test_rebuild_vec_index(store):
         "id": "vrb2", "dataset_key": "vec_rebuild", "raw_text": "b",
         "metadata": {}, "embedding": [0.0, 1.0], "embedding_model": "m",
     })
-    # Manually drop the vec table to simulate corruption / first run
-    tbl = _vec_table_name("vec_rebuild")
+    tbl = vec_table_name("vec_rebuild")
     store._conn.execute(f"DROP TABLE IF EXISTS {tbl}")
     store._conn.execute("UPDATE datasets SET vec_dim = NULL WHERE dataset_key = 'vec_rebuild'")
     store._conn.commit()
-    assert not store._vec_table_exists("vec_rebuild")
+    assert not table_exists(store._conn, "vec_rebuild")
 
     count = store.rebuild_vec_index("vec_rebuild")
     assert count == 2
-    assert store._vec_table_exists("vec_rebuild")
+    assert table_exists(store._conn, "vec_rebuild")
     # Confirm search works after rebuild
     results = store.search_memory_items("vec_rebuild", query_vector=[1.0, 0.0], top_k=2)
     assert results[0]["id"] == "vrb1"

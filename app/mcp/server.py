@@ -13,7 +13,7 @@ This module implements the MCP JSON-RPC 2.0 message format over HTTP POST.
 Mount it at /mcp in the FastAPI app. It accepts raw MCP JSON-RPC bodies and
 returns JSON-RPC responses.
 
-For stdio transport (CLI agents): use the standalone script in scripts/mcp_stdio.py.
+For stdio transport (CLI agents): use the standalone entry point app/mcp/stdio.py.
 
 MCP capabilities exposed
 ------------------------
@@ -49,6 +49,13 @@ import httpx
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse
 
+from app import __version__
+from app.context_builders import (
+    build_context_index,
+    build_dataset_payload,
+    build_graph_payload,
+    build_tool_payload,
+)
 from app.schemas.dataset import DatasetRecord
 from app.schemas.tool import ToolRecord
 from app.store import SqliteStore, get_store
@@ -62,7 +69,7 @@ _SCHEMA_CACHE_TTL = 300.0  # seconds
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "cortexdb", "version": "0.3.0"}
+SERVER_INFO = {"name": "cortexdb", "version": __version__}
 
 
 # ---------------------------------------------------------------------------
@@ -117,40 +124,11 @@ def _tool_metadata_resource(rec: ToolRecord) -> dict:
 
 
 def _dataset_content(rec: DatasetRecord) -> str:
-    payload = {
-        "dataset_key": rec.dataset_key,
-        "display_name": rec.display_name,
-        "llm_summary": rec.llm_summary,
-        "semantic_description": rec.semantic_description,
-        "usage_guidance": rec.usage_guidance,
-        "retrieval_capabilities": rec.retrieval_capabilities,
-        "content_kind": rec.content_kind,
-        "entity_types": rec.entity_types,
-        "access_patterns": rec.access_patterns,
-        "filterable_fields": rec.filterable_fields,
-        "field_descriptions": [fd.model_dump() for fd in rec.field_descriptions],
-        "query_examples": [qe.model_dump() for qe in rec.query_examples],
-        "relationship_hints": rec.relationship_hints,
-        "status": rec.status,
-    }
-    return json.dumps(payload, indent=2)
+    return json.dumps(build_dataset_payload(rec), indent=2)
 
 
 def _tool_content(rec: ToolRecord) -> str:
-    payload = {
-        "tool_key": rec.tool_key,
-        "name": rec.name,
-        "llm_summary": rec.llm_summary,
-        "description": rec.description,
-        "capability_tags": rec.capability_tags,
-        "safety_scope": rec.safety_scope,
-        "input_schema_ref": rec.input_schema_ref,
-        "output_schema_ref": rec.output_schema_ref,
-        "query_examples": [qe.model_dump() for qe in rec.query_examples],
-        "relationship_hints": rec.relationship_hints,
-        "status": rec.status,
-    }
-    return json.dumps(payload, indent=2)
+    return json.dumps(build_tool_payload(rec), indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -211,38 +189,7 @@ def _handle_resources_read(params: dict, store: SqliteStore) -> dict:
     uri: str = params.get("uri", "")
 
     if uri == "cortexdb://context/index":
-        datasets = store.list_datasets()
-        tools = store.list_tools()
-        index = {
-            "datasets": [
-                {
-                    "key": DatasetRecord(**d).dataset_key,
-                    "display_name": DatasetRecord(**d).display_name,
-                    "llm_summary": DatasetRecord(**d).llm_summary,
-                    "capabilities": list(DatasetRecord(**d).retrieval_capabilities),
-                    "entity_types": DatasetRecord(**d).entity_types,
-                    "access_patterns": DatasetRecord(**d).access_patterns,
-                    "status": DatasetRecord(**d).status,
-                }
-                for d in datasets.values()
-            ],
-            "tools": [
-                {
-                    "key": ToolRecord(**t).tool_key,
-                    "name": ToolRecord(**t).name,
-                    "llm_summary": ToolRecord(**t).llm_summary,
-                    "capability_tags": ToolRecord(**t).capability_tags,
-                    "status": ToolRecord(**t).status,
-                }
-                for t in tools.values()
-            ],
-            "relationship_count": len(store.adjacency()),
-            "usage_hint": (
-                "Fetch full context: resources/read cortexdb://datasets/{key} "
-                "or cortexdb://tools/{key}. "
-                "Relationship map: resources/read cortexdb://graph."
-            ),
-        }
+        index = build_context_index(store)
         return {
             "contents": [
                 {
@@ -254,26 +201,7 @@ def _handle_resources_read(params: dict, store: SqliteStore) -> dict:
         }
 
     if uri == "cortexdb://graph":
-        edges = store.adjacency()
-        graph = {
-            "edges": [
-                {
-                    "from_key": e["source_key"],
-                    "from_type": e["source_type"],
-                    "to_key": e["target_key"],
-                    "to_type": e["target_type"],
-                    "edge_type": e["edge_type"],
-                    "description": e.get("description", ""),
-                    "join_fields": e.get("join_fields", []),
-                }
-                for e in edges
-            ],
-            "usage_hint": (
-                "Use edge types to understand data relationships. "
-                "joins_on: shared join fields. feeds_into: data pipeline. "
-                "produces/consumes: tool-dataset relationships."
-            ),
-        }
+        graph = build_graph_payload(store)
         return {
             "contents": [
                 {

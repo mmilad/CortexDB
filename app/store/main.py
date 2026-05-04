@@ -35,14 +35,15 @@ re-embed API endpoint in ``app/api/memory.py`` does this automatically.
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
-import math
-import re
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+from app.store import vec as vec_mod
+from app.store.search import bm25_score, cosine_similarity
 
 logger = logging.getLogger("cortexdb.store")
 
@@ -102,53 +103,11 @@ _MIGRATIONS = [
     "ALTER TABLE datasets ADD COLUMN embedding_model TEXT",
     "ALTER TABLE datasets ADD COLUMN embedded_at     TEXT",
     "ALTER TABLE memory_items ADD COLUMN is_deleted  INTEGER NOT NULL DEFAULT 0",
-    # vec_dim tracks the embedding dimension of the vec0 ANN table for each dataset.
     "ALTER TABLE datasets ADD COLUMN vec_dim INTEGER",
 ]
 
 
-# ------------------------------------------------------------------
-# sqlite-vec optional extension
-# ------------------------------------------------------------------
-
-def _try_load_sqlite_vec(conn: sqlite3.Connection) -> bool:
-    """Attempt to load sqlite-vec into *conn*. Returns True on success."""
-    try:
-        sqlite_vec = importlib.import_module("sqlite_vec")
-    except ModuleNotFoundError:
-        return False
-    try:
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        return True
-    except Exception as exc:
-        logger.warning("sqlite-vec found but failed to load: %s", exc)
-        try:
-            conn.enable_load_extension(False)
-        except Exception:
-            pass
-        return False
-
-
-def _vec_table_name(dataset_key: str) -> str:
-    """Safe vec0 table name derived from a dataset key."""
-    safe = re.sub(r"[^a-z0-9]", "_", dataset_key.lower())
-    return f"vec_items_{safe}"
-
-
-def _serialize_f32(vec: list[float]) -> bytes:
-    """Convert a float list to sqlite-vec float32 binary format."""
-    import struct
-    return struct.pack(f"{len(vec)}f", *vec)
-
-
-# ------------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------------
-
 def _db_path() -> str:
-    import os
     return os.environ.get(_DB_PATH_ENV_VAR, _DEFAULT_DB_PATH)
 
 
@@ -172,21 +131,9 @@ def _init_db(conn: sqlite3.Connection) -> None:
 
 
 # ------------------------------------------------------------------
-# Vector math fallback (stdlib only; no numpy)
-# ------------------------------------------------------------------
-
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
-# ------------------------------------------------------------------
 # SqliteStore
 # ------------------------------------------------------------------
+
 
 class SqliteStore:
     """Thin wrapper around a single SQLite connection.
@@ -202,7 +149,7 @@ class SqliteStore:
     def __init__(self, path: str | None = None) -> None:
         self._conn = _connect(path)
         _init_db(self._conn)
-        self._vec_enabled = _try_load_sqlite_vec(self._conn)
+        self._vec_enabled = vec_mod.try_load_sqlite_vec(self._conn)
         if self._vec_enabled:
             logger.info("sqlite-vec loaded — ANN vector search enabled.")
         else:
@@ -282,20 +229,42 @@ class SqliteStore:
         return result
 
     def delete_dataset(self, key: str) -> bool:
+        """Delete a dataset and cascade to its memory items, their relationships,
+        dataset-level relationships, and the vec0 ANN table."""
         exists = self._conn.execute(
             "SELECT 1 FROM datasets WHERE dataset_key = ?", (key,)
         ).fetchone()
         if not exists:
             return False
+
+        # Collect all item ids before deleting them so we can purge their edges.
+        item_ids = [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT id FROM memory_items WHERE dataset_key = ?", (key,)
+            ).fetchall()
+        ]
+
+        # Cascade: relationships that reference any of the items.
+        if item_ids:
+            placeholders = ",".join("?" for _ in item_ids)
+            self._conn.execute(
+                f"DELETE FROM relationships WHERE source_key IN ({placeholders})"
+                f" OR target_key IN ({placeholders})",
+                item_ids + item_ids,
+            )
+
         self._conn.execute("DELETE FROM memory_items WHERE dataset_key = ?", (key,))
+
+        # Dataset-level relationships (edges whose key is the dataset key itself).
         self._conn.execute(
             "DELETE FROM relationships WHERE source_key = ? OR target_key = ?", (key, key)
         )
         self._conn.execute("DELETE FROM datasets WHERE dataset_key = ?", (key,))
-        # Drop the vec0 ANN table if it exists.
+
         if self._vec_enabled:
-            tbl = _vec_table_name(key)
-            self._conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+            vec_mod.drop_table(self._conn, key)
+
         self._conn.commit()
         return True
 
@@ -416,79 +385,6 @@ class SqliteStore:
     # Vec0 index helpers (only called when _vec_enabled)
     # ------------------------------------------------------------------
 
-    def _vec_table_exists(self, dataset_key: str) -> bool:
-        tbl = _vec_table_name(dataset_key)
-        row = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tbl,)
-        ).fetchone()
-        return row is not None
-
-    def _create_vec_table(self, dataset_key: str, dim: int) -> None:
-        """Create the vec0 table for a dataset at a given dimension."""
-        tbl = _vec_table_name(dataset_key)
-        self._conn.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS {tbl} "
-            f"USING vec0(embedding float[{dim}] distance_metric=cosine)"
-        )
-        self._conn.execute(
-            "UPDATE datasets SET vec_dim = ? WHERE dataset_key = ?", (dim, dataset_key)
-        )
-        self._conn.commit()
-
-    def _drop_vec_table(self, dataset_key: str) -> None:
-        tbl = _vec_table_name(dataset_key)
-        self._conn.execute(f"DROP TABLE IF EXISTS {tbl}")
-        self._conn.execute(
-            "UPDATE datasets SET vec_dim = NULL WHERE dataset_key = ?", (dataset_key,)
-        )
-        self._conn.commit()
-
-    def _get_vec_dim(self, dataset_key: str) -> int | None:
-        """Return the stored vec_dim for the dataset, or None if not set."""
-        row = self._conn.execute(
-            "SELECT vec_dim FROM datasets WHERE dataset_key = ?", (dataset_key,)
-        ).fetchone()
-        return row["vec_dim"] if row else None
-
-    def _ensure_vec_table(self, dataset_key: str, dim: int) -> bool:
-        """Ensure a vec0 table exists for the dataset at the given dimension.
-
-        Returns True if the table is ready at the requested dimension.
-        Returns False if the table exists at a *different* dimension
-        (caller should call rebuild_vec_index to reconcile).
-        """
-        stored_dim = self._get_vec_dim(dataset_key)
-        if stored_dim is None:
-            self._create_vec_table(dataset_key, dim)
-            return True
-        if stored_dim != dim:
-            return False
-        if not self._vec_table_exists(dataset_key):
-            # vec_dim is set but table is missing (e.g. after a manual DROP)
-            self._create_vec_table(dataset_key, dim)
-        return True
-
-    def _vec_upsert(self, dataset_key: str, rowid: int, embedding: list[float]) -> None:
-        """Insert or replace a vector in the vec0 table (vec0 uses DELETE+INSERT)."""
-        tbl = _vec_table_name(dataset_key)
-        self._conn.execute(f"DELETE FROM {tbl} WHERE rowid = ?", (rowid,))
-        self._conn.execute(
-            f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
-            (rowid, _serialize_f32(embedding)),
-        )
-
-    def _vec_delete(self, dataset_key: str, rowid: int) -> None:
-        if self._vec_table_exists(dataset_key):
-            tbl = _vec_table_name(dataset_key)
-            self._conn.execute(f"DELETE FROM {tbl} WHERE rowid = ?", (rowid,))
-
-    def _rowid_for_item(self, item_id: str) -> int | None:
-        """Return the SQLite rowid of a memory_items row by its TEXT id."""
-        row = self._conn.execute(
-            "SELECT rowid FROM memory_items WHERE id = ?", (item_id,)
-        ).fetchone()
-        return row[0] if row else None
-
     def rebuild_vec_index(self, dataset_key: str) -> int:
         """Drop and rebuild the vec0 table for *dataset_key* from stored embeddings.
 
@@ -505,25 +401,24 @@ class SqliteStore:
         ).fetchall()
 
         if not rows:
-            self._drop_vec_table(dataset_key)
+            vec_mod.drop_table(self._conn, dataset_key)
             return 0
 
-        # Determine dimension from the first row
         first_vec = json.loads(rows[0]["embedding"])
         dim = len(first_vec)
 
-        self._drop_vec_table(dataset_key)
-        self._create_vec_table(dataset_key, dim)
+        vec_mod.drop_table(self._conn, dataset_key)
+        vec_mod.create_table(self._conn, dataset_key, dim)
 
-        tbl = _vec_table_name(dataset_key)
+        tbl = vec_mod.vec_table_name(dataset_key)
         self._conn.execute("BEGIN")
         for row in rows:
             vec = json.loads(row["embedding"])
             if len(vec) != dim:
-                continue  # skip dimension-mismatched rows (shouldn't happen)
+                continue
             self._conn.execute(
                 f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
-                (row["rowid"], _serialize_f32(vec)),
+                (row["rowid"], vec_mod.serialize_f32(vec)),
             )
         self._conn.execute("COMMIT")
         return len(rows)
@@ -555,14 +450,13 @@ class SqliteStore:
         )
         self._conn.commit()
 
-        # Sync to vec0 index when embedding is provided and vec is enabled.
         if self._vec_enabled and embedding:
             dim = len(embedding)
-            ready = self._ensure_vec_table(item["dataset_key"], dim)
+            ready = vec_mod.ensure_table(self._conn, item["dataset_key"], dim)
             if ready:
                 rowid = self._rowid_for_item(item["id"])
                 if rowid is not None:
-                    self._vec_upsert(item["dataset_key"], rowid, embedding)
+                    vec_mod.upsert_vector(self._conn, item["dataset_key"], rowid, embedding)
                     self._conn.commit()
             else:
                 logger.warning(
@@ -600,16 +494,27 @@ class SqliteStore:
         return cur.rowcount > 0
 
     def delete_memory_item(self, item_id: str) -> bool:
-        """Hard delete — permanently removes the row and its vec0 entry."""
-        # Need rowid and dataset_key before deletion for vec cleanup.
+        """Hard delete — permanently removes the row, its vec0 entry, and any
+        relationships that reference this item as source or target."""
         row = self._conn.execute(
             "SELECT rowid, dataset_key FROM memory_items WHERE id = ?", (item_id,)
         ).fetchone()
+        if not row:
+            return False
+
+        # Cascade: remove any relationship edges that reference this item.
+        self._conn.execute(
+            "DELETE FROM relationships WHERE source_key = ? OR target_key = ?",
+            (item_id, item_id),
+        )
+
         cur = self._conn.execute("DELETE FROM memory_items WHERE id = ?", (item_id,))
         self._conn.commit()
-        if cur.rowcount > 0 and row and self._vec_enabled:
-            self._vec_delete(row["dataset_key"], row["rowid"])
+
+        if cur.rowcount > 0 and self._vec_enabled:
+            vec_mod.delete_vector(self._conn, row["dataset_key"], row["rowid"])
             self._conn.commit()
+
         return cur.rowcount > 0
 
     def search_memory_items(
@@ -639,17 +544,14 @@ class SqliteStore:
         needs_vector = query_vector is not None
 
         if needs_vector and keyword_query is None:
-            # Vector-only: use ANN path when available.
             return self._search_vector_only(
                 dataset_key, query_vector, top_k, metadata_filters  # type: ignore[arg-type]
             )
 
         if query_vector is None and keyword_query is not None:
-            # Keyword-only: BM25 over all non-deleted items.
             return self._search_keyword_only(dataset_key, keyword_query, top_k, metadata_filters)
 
         if needs_vector and keyword_query is not None:
-            # Hybrid: merge ANN results with BM25.
             return self._search_hybrid(
                 dataset_key, query_vector, keyword_query,  # type: ignore[arg-type]
                 top_k, metadata_filters, vector_weight
@@ -696,12 +598,11 @@ class SqliteStore:
         top_k: int,
         metadata_filters: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
-        if self._vec_enabled and self._vec_table_exists(dataset_key):
+        if self._vec_enabled and vec_mod.table_exists(self._conn, dataset_key):
             return self._vec_knn_search(
                 dataset_key, query_vector, top_k, metadata_filters,
                 keyword_query=None, vector_weight=1.0
             )
-        # Fallback: Python cosine scan
         items = self._load_items_for_scan(dataset_key, require_embedding=True)
         items = self._apply_metadata_filter(items, metadata_filters)
         scored = []
@@ -728,7 +629,7 @@ class SqliteStore:
         items = self._apply_metadata_filter(items, metadata_filters)
         for item in items:
             item.pop("_embedding_raw", None)
-        scored = _bm25_score(items, keyword_query)
+        scored = bm25_score(items, keyword_query)
         scored = [it for it in scored if it["keyword_score"] > 0]
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:top_k]
@@ -742,17 +643,15 @@ class SqliteStore:
         metadata_filters: dict[str, Any] | None,
         vector_weight: float,
     ) -> list[dict[str, Any]]:
-        if self._vec_enabled and self._vec_table_exists(dataset_key):
+        if self._vec_enabled and vec_mod.table_exists(self._conn, dataset_key):
             return self._vec_knn_search(
                 dataset_key, query_vector, top_k, metadata_filters,
                 keyword_query=keyword_query, vector_weight=vector_weight
             )
-        # Fallback: Python scan + BM25 blend
         items = self._load_items_for_scan(dataset_key, require_embedding=False)
         items = self._apply_metadata_filter(items, metadata_filters)
 
-        # BM25 scores over full candidate set
-        items_with_kw = _bm25_score(items, keyword_query)
+        items_with_kw = bm25_score(items, keyword_query)
 
         scored = []
         for item in items_with_kw:
@@ -776,21 +675,15 @@ class SqliteStore:
         keyword_query: str | None,
         vector_weight: float,
     ) -> list[dict[str, Any]]:
-        """ANN search via vec0 with optional BM25 blending and metadata filtering.
-
-        Fetches a candidate set of min(total, top_k * 20) items from the ANN
-        index, then applies metadata filtering and BM25 blending in Python.
-        At <=20 000 rows the candidate set is the full dataset, which is fine.
-        """
-        tbl = _vec_table_name(dataset_key)
+        """ANN search via vec0 with optional BM25 blending and metadata filtering."""
+        tbl = vec_mod.vec_table_name(dataset_key)
         total = self.count_memory_items(dataset_key)
         candidate_k = min(total, max(top_k * 20, top_k))
 
-        # ANN KNN — returns (rowid, distance) sorted by distance (ascending = more similar)
         knn_rows = self._conn.execute(
             f"SELECT rowid, distance FROM {tbl} "
             f"WHERE embedding MATCH ? AND k = ?",
-            (_serialize_f32(query_vector), candidate_k),
+            (vec_mod.serialize_f32(query_vector), candidate_k),
         ).fetchall()
 
         if not knn_rows:
@@ -813,14 +706,13 @@ class SqliteStore:
         items = self._apply_metadata_filter(items, metadata_filters)
 
         if keyword_query:
-            items = _bm25_score(items, keyword_query)
+            items = bm25_score(items, keyword_query)
 
         scored = []
         for item in items:
             item.pop("_embedding_raw", None)
             rowid = item.pop("_rowid", None)
             ann_dist = rowid_to_dist.get(rowid, 1.0)
-            # Convert cosine distance (0=identical, 2=opposite) to similarity [0,1]
             vec_score = round(max(0.0, 1.0 - ann_dist), 6)
 
             if keyword_query:
@@ -866,7 +758,6 @@ class SqliteStore:
         )
         self._conn.commit()
 
-        # Sync to vec0 index.
         if self._vec_enabled:
             row = self._conn.execute(
                 "SELECT rowid, dataset_key FROM memory_items WHERE id = ?", (item_id,)
@@ -875,10 +766,16 @@ class SqliteStore:
                 dataset_key = row["dataset_key"]
                 rowid = row["rowid"]
                 dim = len(embedding)
-                ready = self._ensure_vec_table(dataset_key, dim)
+                ready = vec_mod.ensure_table(self._conn, dataset_key, dim)
                 if ready:
-                    self._vec_upsert(dataset_key, rowid, embedding)
+                    vec_mod.upsert_vector(self._conn, dataset_key, rowid, embedding)
                     self._conn.commit()
+
+    def _rowid_for_item(self, item_id: str) -> int | None:
+        row = self._conn.execute(
+            "SELECT rowid FROM memory_items WHERE id = ?", (item_id,)
+        ).fetchone()
+        return row[0] if row else None
 
     @staticmethod
     def _row_to_item(row: sqlite3.Row) -> dict[str, Any]:
@@ -887,84 +784,8 @@ class SqliteStore:
         raw_emb = d.pop("embedding", None)
         d["_embedding_raw"] = json.loads(raw_emb) if raw_emb else None
         d["is_deleted"] = bool(d.get("is_deleted", 0))
-        # rowid is a pseudo-column; strip it from the public dict
         d.pop("rowid", None)
         return d
-
-
-# ------------------------------------------------------------------
-# BM25 keyword scorer (stdlib only)
-# ------------------------------------------------------------------
-
-def _tokenize(text: str) -> list[str]:
-    """Lowercase word tokeniser — splits on non-alphanumeric characters."""
-    return re.findall(r"[a-z0-9]+", text.lower())
-
-
-def _bm25_score(
-    items: list[dict[str, Any]],
-    query: str,
-    k1: float = 1.5,
-    b: float = 0.75,
-) -> list[dict[str, Any]]:
-    """Compute BM25 scores for *items* against *query*.
-
-    Adds ``keyword_score`` and sets ``score = keyword_score`` on each item.
-    Items with zero score are retained (caller filters if needed).
-
-    BM25 parameters: k1=1.5 (term-frequency saturation), b=0.75 (length norm).
-    """
-    if not items:
-        return items
-
-    query_terms = set(_tokenize(query))
-    if not query_terms:
-        for it in items:
-            it["keyword_score"] = 0.0
-            it["score"] = 0.0
-        return items
-
-    # Tokenize all documents
-    doc_tokens: list[list[str]] = [_tokenize(it.get("raw_text", "")) for it in items]
-    N = len(items)
-    avg_dl = sum(len(t) for t in doc_tokens) / N if N else 1.0
-
-    # IDF per query term: log((N - df + 0.5) / (df + 0.5) + 1)
-    df: dict[str, int] = {}
-    for tokens in doc_tokens:
-        for term in query_terms:
-            if term in tokens:
-                df[term] = df.get(term, 0) + 1
-
-    idf: dict[str, float] = {}
-    for term in query_terms:
-        n_t = df.get(term, 0)
-        idf[term] = math.log((N - n_t + 0.5) / (n_t + 0.5) + 1.0)
-
-    # Score each document
-    for item, tokens in zip(items, doc_tokens):
-        dl = len(tokens)
-        tf_counts: dict[str, int] = {}
-        for t in tokens:
-            if t in query_terms:
-                tf_counts[t] = tf_counts.get(t, 0) + 1
-
-        bm25 = 0.0
-        for term in query_terms:
-            tf = tf_counts.get(term, 0)
-            if tf == 0:
-                continue
-            norm_tf = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avg_dl))
-            bm25 += idf[term] * norm_tf
-
-        # Normalise to [0, 1] using a soft-max approach:
-        # max possible BM25 score per term ≈ idf * (k1+1)
-        max_possible = sum(idf[t] * (k1 + 1) for t in query_terms) or 1.0
-        norm_score = round(min(bm25 / max_possible, 1.0), 6)
-        item["keyword_score"] = norm_score
-        item["score"] = norm_score
-
-    return items
 
 
 # ------------------------------------------------------------------
