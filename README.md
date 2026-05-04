@@ -69,6 +69,22 @@ API docs: `http://127.0.0.1:8000/docs`
 
 End-to-end example: `python examples/quickstart.py`
 
+## Testing
+
+Run tests with embedding disabled to avoid external model/provider dependencies:
+
+```bash
+export CORTEXDB_EMBED_PROVIDER=none
+pytest
+```
+
+For a realistic API flow using `FastAPI TestClient` and an isolated temporary
+SQLite database:
+
+```bash
+pytest tests/test_simulated_usage.py -q
+```
+
 ### sqlite-vec ANN index
 
 When `sqlite-vec` is installed (`pip install -e ".[vec]"`), CortexDB
