@@ -5,17 +5,24 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[vec]"     # includes sqlite-vec for ANN search
 uvicorn app.main:app --reload
 ```
 
 Storage defaults to `cortexdb.sqlite` in the working directory.
 Override with `CORTEXDB_DB_PATH=/path/to/file.sqlite`.
 
+Disable embedding (faster startup, registry + MCP reads still work):
+
+```bash
+CORTEXDB_EMBED_PROVIDER=none uvicorn app.main:app --reload
+```
+
 ## Open docs
 
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
+- Health check: `http://127.0.0.1:8000/health`
 
 ---
 
@@ -31,11 +38,12 @@ An LLM agent should follow this pattern for low token usage:
 ```
 
 For MCP-native agents:
+
 ```
-1. resources/list              → same as context/index but MCP format
-2. resources/read cortexdb://datasets/{key}   → full dataset context
-3. resources/read cortexdb://graph            → relationship map
-4. resources/read cortexdb://context/index    → minimal orientation
+1. resources/list                               → same as context/index but MCP format
+2. resources/read cortexdb://context/index      → minimal orientation
+3. resources/read cortexdb://datasets/{key}     → full dataset context
+4. resources/read cortexdb://graph              → relationship map
 ```
 
 ---
@@ -78,7 +86,21 @@ curl -X POST http://127.0.0.1:8000/datasets \
 curl http://127.0.0.1:8000/datasets
 ```
 
-### Discover or get a blueprint for a new dataset
+### Get a single dataset
+
+```bash
+curl http://127.0.0.1:8000/datasets/tech_knowledge
+```
+
+### Delete a dataset
+
+Deletes the dataset record and cascades to its memory items and relationships.
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/datasets/tech_knowledge
+```
+
+### Discover or match a dataset by intent
 
 ```bash
 curl -X POST http://127.0.0.1:8000/datasets/discover \
@@ -89,6 +111,111 @@ curl -X POST http://127.0.0.1:8000/datasets/discover \
     "content_kind": "documents",
     "tag_filters": ["rag"]
   }'
+```
+
+### Validate a dataset (stamp last_validated_at)
+
+Call this after verifying the dataset metadata is consistent with the backing data. The `last_validated_at` timestamp can be monitored to detect metadata drift.
+
+```bash
+curl -X POST http://127.0.0.1:8000/datasets/tech_knowledge/validate
+```
+
+---
+
+## Memory items (ingest, search, list, delete)
+
+Memory items are raw-text records stored inside a dataset. CortexDB embeds them automatically.
+
+### Ingest raw text items
+
+Embedding must be enabled (`CORTEXDB_EMBED_PROVIDER=ollama` or `=api`).
+
+```bash
+curl -X POST http://127.0.0.1:8000/datasets/tech_knowledge/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      {"raw_text": "Connection pool exhaustion fix: increase pool size in config.", "metadata": {"component": "database", "severity": "critical"}},
+      {"raw_text": "Auth service returns 401 when JWT secret is rotated.", "metadata": {"component": "auth", "severity": "high"}}
+    ]
+  }'
+```
+
+### Vector search
+
+```bash
+curl -X POST http://127.0.0.1:8000/datasets/tech_knowledge/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "database connection issues", "top_k": 5}'
+```
+
+### Keyword-only search (no embedding required)
+
+Set `vector_weight=0.0` and provide `keyword_query`. Works even when `CORTEXDB_EMBED_PROVIDER=none`.
+
+```bash
+curl -X POST http://127.0.0.1:8000/datasets/tech_knowledge/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "", "keyword_query": "connection pool", "vector_weight": 0.0, "top_k": 5}'
+```
+
+### Hybrid search (vector + keyword blend)
+
+```bash
+curl -X POST http://127.0.0.1:8000/datasets/tech_knowledge/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "database connection issues", "keyword_query": "pool exhaustion", "vector_weight": 0.7, "top_k": 5}'
+```
+
+### Search with metadata filters
+
+```bash
+curl -X POST http://127.0.0.1:8000/datasets/tech_knowledge/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "auth failures", "metadata_filters": {"component": "auth"}, "top_k": 5}'
+```
+
+### List memory items (paginated)
+
+```bash
+curl "http://127.0.0.1:8000/datasets/tech_knowledge/items?limit=20&offset=0"
+```
+
+Include soft-deleted items:
+
+```bash
+curl "http://127.0.0.1:8000/datasets/tech_knowledge/items?include_deleted=true"
+```
+
+### Get a single memory item
+
+```bash
+curl http://127.0.0.1:8000/datasets/tech_knowledge/items/{item_id}
+```
+
+### Soft-delete a memory item (recoverable)
+
+The item is excluded from queries by default but can be retrieved with `include_deleted=true`.
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/datasets/tech_knowledge/items/{item_id}
+```
+
+### Hard-delete a memory item (irreversible)
+
+Permanently removes the row and its vec0 ANN entry. Also deletes any relationships referencing this item.
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/datasets/tech_knowledge/items/{item_id}/hard
+```
+
+### Re-embed all items in a dataset
+
+Use after changing the embedding model to re-vectorize all stored items. Rebuilds the vec0 ANN index automatically.
+
+```bash
+curl -X POST "http://127.0.0.1:8000/datasets/tech_knowledge/re-embed?batch_size=50"
 ```
 
 ---
@@ -115,6 +242,24 @@ curl -X POST http://127.0.0.1:8000/tools \
     "embedding_model_version": "text-embed-v1",
     "status": "active"
   }'
+```
+
+### List all tools
+
+```bash
+curl http://127.0.0.1:8000/tools
+```
+
+### Get a single tool
+
+```bash
+curl http://127.0.0.1:8000/tools/log_search
+```
+
+### Delete a tool
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/tools/log_search
 ```
 
 ---
@@ -144,6 +289,18 @@ Edge types: `joins_on`, `feeds_into`, `shared_entity`, `produces`, `consumes`, `
 
 ```bash
 curl "http://127.0.0.1:8000/relationships?node_key=tech_knowledge"
+```
+
+### Get a single relationship
+
+```bash
+curl http://127.0.0.1:8000/relationships/rel-001
+```
+
+### Delete a relationship
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/relationships/rel-001
 ```
 
 ---
@@ -178,10 +335,19 @@ curl http://127.0.0.1:8000/context/graph
 
 ## Graph Traversal
 
-### BFS from a starting node (depth 1-5)
+### BFS from a starting node (depth 1–5)
 
 ```bash
 curl "http://127.0.0.1:8000/graph/explore?start=dataset:tech_knowledge&depth=2"
+```
+
+Response shape:
+
+```json
+{
+  "nodes": [{"key": "tech_knowledge", "type": "dataset"}, ...],
+  "edges": [{"source": "tech_knowledge", "target": "known_issues", "edge_type": "related", ...}]
+}
 ```
 
 ---
@@ -238,4 +404,14 @@ curl -X POST http://127.0.0.1:8000/mcp \
 curl -X POST http://127.0.0.1:8000/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}'
+```
+
+### Call an MCP tool (passthrough — execution is external)
+
+CortexDB does not execute tools internally. `tools/call` returns the tool's registry metadata so the caller can execute it.
+
+```bash
+curl -X POST http://127.0.0.1:8000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"log_search","arguments":{}}}'
 ```

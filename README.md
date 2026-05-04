@@ -6,10 +6,10 @@ CortexDB is a **LLM-native memory and retrieval layer** for agentic systems.
 
 - **No LLM logic inside CortexDB.** All reasoning stays external.
 - CortexDB stores, indexes, filters, and scores data deterministically.
-- Consumer applications provide embeddings/intents and perform reasoning externally.
+- Consumer applications provide raw text and perform reasoning externally.
 - Every dataset and tool is self-describing in a format LLMs can consume efficiently.
 
-## What's in here
+## Feature status
 
 | Feature | Status |
 |---|---|
@@ -28,9 +28,11 @@ CortexDB is a **LLM-native memory and retrieval layer** for agentic systems.
 | sqlite-vec ANN index (optional, auto-detected) | ✅ |
 | Relationship cascade delete | ✅ |
 | MCP `input_schema_ref` URL resolution | ✅ |
+| Re-embedding jobs (`/datasets/{key}/re-embed`) | ✅ |
+| Dataset metadata validation (`/datasets/{key}/validate`) | ✅ |
 | Postgres + pgvector backend | Planned |
-| Re-embedding jobs (raw text preserved) | ✅ |
 | Tenant / namespace isolation | Planned |
+| Scoring profiles stored in DB | Planned |
 
 ## Quick start
 
@@ -56,7 +58,7 @@ CORTEXDB_EMBED_MODEL=text-embedding-3-small \
 CORTEXDB_EMBED_API_KEY=sk-... \
 uvicorn app.main:app --reload
 
-# Disable embedding entirely
+# Disable embedding entirely (registry + MCP reads still work)
 CORTEXDB_EMBED_PROVIDER=none uvicorn app.main:app --reload
 ```
 
@@ -106,10 +108,10 @@ GET /graph/explore?start=.. → BFS subgraph from a starting node
 Or via MCP (HTTP):
 
 ```
-resources/list              → all registered datasets and tools as MCP resources
-resources/read cortexdb://context/index   → minimal orientation
-resources/read cortexdb://datasets/{key}  → full dataset context
-resources/read cortexdb://graph           → relationship map
+resources/list                                    → all registered datasets and tools as MCP resources
+resources/read cortexdb://context/index           → minimal orientation
+resources/read cortexdb://datasets/{key}          → full dataset context
+resources/read cortexdb://graph                   → relationship map
 ```
 
 Or via MCP (stdio — for Claude Desktop, Cursor, Continue, etc.):
@@ -140,8 +142,19 @@ Example `claude_desktop_config.json` entry:
 Adding a new dataset via `POST /datasets` automatically updates MCP `resources/list`
 and `GET /context/index` — no code changes or restarts needed.
 
+## Testing
+
+```bash
+export CORTEXDB_EMBED_PROVIDER=none
+pip install -e '.[dev]'
+pytest
+```
+
+109 tests, no Ollama or running server required.
+
 ## Docs
 
-- Strategy & design: [`STRATEGY.md`](./STRATEGY.md)
-- Architecture plan: [`ARCHITECTURE_PLAN.md`](./ARCHITECTURE_PLAN.md)
-- Usage guide: [`docs/USAGE.md`](./docs/USAGE.md)
+- Agent operations guide: [`AGENTS.md`](./AGENTS.md) — **start here if you are an AI agent**
+- Usage guide with curl examples: [`docs/USAGE.md`](./docs/USAGE.md)
+- Architecture and design decisions: [`ARCHITECTURE_PLAN.md`](./ARCHITECTURE_PLAN.md)
+- Historical strategy and design rationale: [`STRATEGY.md`](./STRATEGY.md)
