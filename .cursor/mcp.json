@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "cortexdb": {
+      "command": "python",
+      "args": ["-m", "app.mcp.stdio"],
+      "env": {
+        "CORTEXDB_EMBED_PROVIDER": "none",
+        "CORTEXDB_DB_PATH": "${workspaceFolder}/cortexdb.sqlite"
+      }
+    }
+  }
+}
