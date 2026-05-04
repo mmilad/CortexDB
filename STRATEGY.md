@@ -1,5 +1,7 @@
 # CortexDB — LLM-Native Database Strategy
 
+> **Status note for AI agents:** This document was written when CortexDB was in early planning. The features described as gaps or future work in the body text have since been implemented. Treat the body as design rationale, not a to-do list. The canonical feature status is in `README.md` and `AGENTS.md`.
+
 ## Executive Summary
 
 CortexDB is a **memory and retrieval layer** for agentic/LLM systems. Its core design principle — *"LLM outside, memory intelligence inside"* — is sound. This document identifies the gaps between the current implementation and a genuinely LLM-native database, then describes an incremental build strategy that solves the five recurring LLM context problems, provides meaningful relationship management, and exposes a dynamic, low-token-cost MCP interface.
@@ -303,17 +305,21 @@ The implementation sequence follows dependency order. Each step is independently
 
 ## 10. Summary Checklist
 
+> **Note:** This document was written as a forward-looking strategy. All items originally marked "To build" are now implemented. The remaining items are the genuine future roadmap.
+
 | Feature | Status | Priority |
 |---|---|---|
-| SQLite persistence | To build | Critical |
-| `RelationshipRecord` + `/relationships` API | To build | Critical |
-| `llm_summary`, `query_examples` on schemas | To build | High |
-| `GET /context/index` | To build | High |
-| `GET /context/dataset/{key}` | To build | High |
-| `GET /context/graph` | To build | High |
-| `GET /graph/explore` (BFS traversal) | To build | Medium |
-| Dynamic MCP server module | To build | Medium |
-| Hybrid retrieval (vector + keyword + filter) | Future | Medium |
-| Re-embedding jobs | Future | Low |
-| Tenant/namespace isolation | Future | Low |
-| Scoring profiles in DB | Future | Low |
+| SQLite persistence | ✅ Done | Critical |
+| `RelationshipRecord` + `/relationships` API | ✅ Done | Critical |
+| `llm_summary`, `query_examples` on schemas | ✅ Done | High |
+| `GET /context/index` | ✅ Done | High |
+| `GET /context/dataset/{key}` | ✅ Done | High |
+| `GET /context/graph` | ✅ Done | High |
+| `GET /graph/explore` (BFS traversal) | ✅ Done | Medium |
+| Dynamic MCP server module (HTTP + stdio) | ✅ Done | Medium |
+| Hybrid retrieval (vector + keyword + filter) | ✅ Done | Medium |
+| Re-embedding jobs (`/datasets/{key}/re-embed`) | ✅ Done | Low |
+| Dataset metadata validation (`/datasets/{key}/validate`) | ✅ Done | Low |
+| Tenant/namespace isolation | Planned | Low |
+| Scoring profiles in DB | Planned | Low |
+| Postgres + pgvector backend | Planned | Low |

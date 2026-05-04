@@ -1,5 +1,7 @@
 # CortexDB Architecture Plan (AI/LLM/Agentic Brain Layer)
 
+> **Status note for AI agents:** This document was written as a forward-looking architecture plan. Milestones 1–4 are complete. The remaining milestone (operations/retention) and the Postgres/pgvector upgrade path are the genuine future roadmap. The current production storage is SQLite with optional `sqlite-vec` for ANN search. See `README.md` and `AGENTS.md` for the authoritative current state.
+
 ## 0) Critical Product Constraint (Must-Have)
 
 CortexDB is a **service-layer memory database** and must **not run LLM inference or agent reasoning internally**.
@@ -138,17 +140,15 @@ This avoids irrelevant recall and reduces accidental cross-agent leakage.
 
 ## 6) Storage Architecture (Pragmatic v1)
 
-A practical v1 architecture:
+> **Current implementation:** SQLite (stdlib `sqlite3`) with optional `sqlite-vec` for ANN vector search. This matches the "Phase A" path described in §6.1 below.
 
-- **Relational store (Postgres)**
-  - System of record for entities, metadata, permissions, sessions, registries.
-- **Vector index (pgvector in Postgres or dedicated vector DB later)**
-  - Start with pgvector for operational simplicity.
-  - Migrate high-scale workloads to dedicated vector service when needed.
-- **Object storage (optional but likely soon)**
-  - Raw document blobs / large artifacts.
+The original plan called for Postgres as the primary store. The implemented v1 instead uses SQLite for maximum portability and zero-dependency operation:
 
-Why this works: one operational plane early, easier consistency, fewer moving parts.
+- **SQLite** — system of record for datasets, tools, relationships, and memory items.
+- **sqlite-vec** (optional) — ANN vector index (`vec0` virtual table per dataset). Auto-detected on startup. Falls back to Python cosine scan when not installed.
+- **Object storage** — not yet implemented; raw text is stored inline in SQLite.
+
+The Postgres + pgvector path remains the planned upgrade for high-scale or multi-node deployments.
 
 
 ## 6.1 Lightweight DB Options (Researched)
@@ -271,24 +271,27 @@ Before endpoint naming, define capability groups:
 
 ## 12) Minimal v1 Milestones
 
-**Milestone 1: Foundation**
-- Tenant, agent, namespace models.
+**Milestone 1: Foundation** ✅ Complete
 - Memory item schema + metadata filters.
-- Dataset/Tool registries.
+- Dataset/Tool registries with SQLite persistence.
 
-**Milestone 2: Semantic retrieval**
-- Embeddings + vector index + scoped similarity search.
-- Tool retrieval and schema-aware filtering.
+**Milestone 2: Semantic retrieval** ✅ Complete
+- Embeddings + vector index (sqlite-vec ANN or Python cosine fallback) + scoped similarity search.
+- Dataset vector discovery via `/datasets/discover`.
 
-**Milestone 3: Hybrid + quality**
-- Keyword + vector blend, reranking, provenance output.
-- Deterministic scoring profiles.
+**Milestone 3: Hybrid + quality** ✅ Complete
+- BM25 keyword + vector blend with configurable `vector_weight`.
+- Provenance output (score breakdown per hit).
 
-**Milestone 4: Dynamic MCP exposure**
-- Registry-backed capability descriptors and versioned discovery.
+**Milestone 4: Dynamic MCP exposure** ✅ Complete
+- Registry-backed MCP resources and tool descriptors (HTTP + stdio transports).
+- `cortexdb://context/index`, `cortexdb://graph`, per-dataset and per-tool URIs.
 
-**Milestone 5: Operations**
-- Retention jobs, re-embedding jobs, observability dashboards.
+**Milestone 5: Operations** ⬜ Partial
+- Re-embedding endpoint (`/datasets/{key}/re-embed`) — ✅ done.
+- Dataset metadata validation (`/datasets/{key}/validate`) — ✅ done.
+- Retention / TTL jobs — planned.
+- Observability dashboards — planned.
 
 ## 13) Risks to Address Early
 
