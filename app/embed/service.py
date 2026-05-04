@@ -9,11 +9,13 @@ On startup (called from app lifespan):
      d. Ensure the configured model is pulled.
   3. Warm up with a single test embed to catch misconfiguration early.
 
-On shutdown: terminate the managed Ollama subprocess if we started it.
+On shutdown: close the async HTTP client and terminate the managed Ollama
+subprocess if we started it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 import time
@@ -36,13 +38,13 @@ class EmbeddingService:
         self._config: EmbedConfig | None = None
         self._provider: EmbeddingProvider | None = None
         self._ollama_proc: subprocess.Popen | None = None
-        self._http: httpx.Client | None = None
+        self._http: httpx.AsyncClient | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def startup(self) -> None:
+    async def startup(self) -> None:
         self._config = EmbedConfig.from_env()
         logger.info("Embedding provider: %s / model: %s", self._config.provider, self._config.model)
 
@@ -52,28 +54,27 @@ class EmbeddingService:
             logger.info("Embedding disabled.")
             return
 
-        self._http = httpx.Client(timeout=60.0)
+        self._http = httpx.AsyncClient(timeout=60.0)
 
         if self._config.provider == "ollama" and self._config.ollama_autostart:
-            self._ensure_ollama_running()
+            await self._ensure_ollama_running()
 
         self._provider = build_provider(self._config, self._http)
 
         if self._config.provider == "ollama":
             assert isinstance(self._provider, OllamaProvider)
             try:
-                self._provider.ensure_model_pulled()
+                await self._provider.ensure_model_pulled()
             except Exception as exc:
                 logger.warning("Could not pull model %s: %s", self._config.model, exc)
 
-        # Warm-up
         try:
-            self._provider.embed_one("warmup")
+            await self._provider.embed_one("warmup")
             logger.info("Embedding service ready. model_id=%s", self._provider.model_id())
         except Exception as exc:
             logger.warning("Embedding warm-up failed: %s. Service will retry on first real call.", exc)
 
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
         if self._ollama_proc is not None:
             logger.info("Stopping managed Ollama process (pid=%s)...", self._ollama_proc.pid)
             self._ollama_proc.terminate()
@@ -83,7 +84,7 @@ class EmbeddingService:
                 self._ollama_proc.kill()
             self._ollama_proc = None
         if self._http is not None:
-            self._http.close()
+            await self._http.aclose()
             self._http = None
         self._provider = None
 
@@ -101,11 +102,11 @@ class EmbeddingService:
     def model_id(self) -> str:
         return self.provider.model_id()
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        return self.provider.embed(texts)
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return await self.provider.embed(texts)
 
-    def embed_one(self, text: str) -> list[float]:
-        return self.provider.embed_one(text)
+    async def embed_one(self, text: str) -> list[float]:
+        return await self.provider.embed_one(text)
 
     def is_enabled(self) -> bool:
         return self._config is not None and self._config.provider != "none"
@@ -114,19 +115,19 @@ class EmbeddingService:
     # Ollama auto-start
     # ------------------------------------------------------------------
 
-    def _ollama_reachable(self) -> bool:
+    async def _ollama_reachable(self) -> bool:
         assert self._config is not None
         assert self._http is not None
         try:
-            resp = self._http.get(f"{self._config.url}/api/tags", timeout=3.0)
+            resp = await self._http.get(f"{self._config.url}/api/tags", timeout=3.0)
             return resp.status_code == 200
         except Exception:
             return False
 
-    def _ensure_ollama_running(self) -> None:
+    async def _ensure_ollama_running(self) -> None:
         assert self._config is not None
 
-        if self._ollama_reachable():
+        if await self._ollama_reachable():
             logger.info("Ollama already running at %s.", self._config.url)
             return
 
@@ -148,10 +149,10 @@ class EmbeddingService:
 
         deadline = time.monotonic() + _OLLAMA_READY_TIMEOUT
         while time.monotonic() < deadline:
-            if self._ollama_reachable():
+            if await self._ollama_reachable():
                 logger.info("Ollama started (pid=%s).", self._ollama_proc.pid)
                 return
-            time.sleep(_OLLAMA_READY_POLL)
+            await asyncio.sleep(_OLLAMA_READY_POLL)
 
         logger.warning(
             "Ollama did not become ready within %ds. "

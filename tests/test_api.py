@@ -22,8 +22,7 @@ def client():
     os.environ["CORTEXDB_DB_PATH"] = db_path
 
     # Import after env vars are set so singletons pick them up
-    from app.store import _store  # noqa: F401
-    import app.store as store_mod
+    import app.store.main as store_mod
     import app.embed.service as embed_mod
 
     # Reset singletons so each test module gets fresh state
@@ -440,7 +439,8 @@ def test_mcp_initialize(client):
     assert r.status_code == 200
     body = r.json()
     assert body["result"]["protocolVersion"] == "2024-11-05"
-    assert body["result"]["serverInfo"]["version"] == "0.3.0"
+    from app import __version__
+    assert body["result"]["serverInfo"]["version"] == __version__
 
 
 def test_mcp_ping(client):

@@ -1,6 +1,6 @@
 """Embedding provider implementations.
 
-All providers implement the same interface:
+All providers implement the same async interface:
     embed(texts: list[str]) -> list[list[float]]
 
 Callers never touch vectors — only raw text goes in, vectors come out.
@@ -22,21 +22,21 @@ class EmbeddingProvider(ABC):
     """Base protocol for all embedding providers."""
 
     @abstractmethod
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a list of texts. Returns one vector per input, in order."""
 
     @abstractmethod
     def model_id(self) -> str:
         """Return a stable identifier: 'provider/model' used for provenance tracking."""
 
-    def embed_one(self, text: str) -> list[float]:
-        return self.embed([text])[0]
+    async def embed_one(self, text: str) -> list[float]:
+        return (await self.embed([text]))[0]
 
 
 class NullProvider(EmbeddingProvider):
     """Used when CORTEXDB_EMBED_PROVIDER=none. Raises on any embed call."""
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(self, texts: list[str]) -> list[list[float]]:
         raise RuntimeError(
             "Embedding is disabled (CORTEXDB_EMBED_PROVIDER=none). "
             "Set a provider to enable vector search."
@@ -53,21 +53,19 @@ class OllamaProvider(EmbeddingProvider):
     endpoint is not available.
     """
 
-    def __init__(self, config: EmbedConfig, client: httpx.Client | None = None) -> None:
+    def __init__(self, config: EmbedConfig, client: httpx.AsyncClient | None = None) -> None:
         self._url = config.url
         self._model = config.model
-        self._client = client or httpx.Client(timeout=60.0)
+        self._client = client or httpx.AsyncClient(timeout=60.0)
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        # Try batch endpoint first (Ollama >= 0.3)
+    async def embed(self, texts: list[str]) -> list[list[float]]:
         try:
-            resp = self._client.post(
+            resp = await self._client.post(
                 f"{self._url}/api/embed",
                 json={"model": self._model, "input": texts},
             )
             if resp.status_code == 200:
                 data = resp.json()
-                # Ollama returns {"embeddings": [[...], ...]}
                 if "embeddings" in data:
                     return data["embeddings"]
         except httpx.RequestError:
@@ -76,7 +74,7 @@ class OllamaProvider(EmbeddingProvider):
         # Fallback: single-text legacy endpoint
         results = []
         for text in texts:
-            resp = self._client.post(
+            resp = await self._client.post(
                 f"{self._url}/api/embeddings",
                 json={"model": self._model, "prompt": text},
             )
@@ -87,10 +85,10 @@ class OllamaProvider(EmbeddingProvider):
     def model_id(self) -> str:
         return f"ollama/{self._model}"
 
-    def ensure_model_pulled(self) -> None:
-        """Pull the model if not already present. Blocks until done."""
+    async def ensure_model_pulled(self) -> None:
+        """Pull the model if not already present."""
         logger.info("Checking Ollama model %s...", self._model)
-        resp = self._client.post(
+        resp = await self._client.post(
             f"{self._url}/api/pull",
             json={"name": self._model, "stream": False},
             timeout=300.0,
@@ -106,11 +104,11 @@ class ApiProvider(EmbeddingProvider):
     Together AI, Mistral, and any other compatible API.
     """
 
-    def __init__(self, config: EmbedConfig, client: httpx.Client | None = None) -> None:
+    def __init__(self, config: EmbedConfig, client: httpx.AsyncClient | None = None) -> None:
         self._url = config.url
         self._model = config.model
         self._api_key = config.api_key
-        self._client = client or httpx.Client(timeout=60.0)
+        self._client = client or httpx.AsyncClient(timeout=60.0)
 
     def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -118,15 +116,14 @@ class ApiProvider(EmbeddingProvider):
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        resp = self._client.post(
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        resp = await self._client.post(
             f"{self._url}/v1/embeddings",
             headers=self._headers(),
             json={"model": self._model, "input": texts},
         )
         resp.raise_for_status()
         data = resp.json()
-        # OpenAI returns {"data": [{"embedding": [...], "index": N}, ...]}
         items = sorted(data["data"], key=lambda x: x["index"])
         return [item["embedding"] for item in items]
 
@@ -134,7 +131,7 @@ class ApiProvider(EmbeddingProvider):
         return f"api/{self._model}"
 
 
-def build_provider(config: EmbedConfig, http_client: httpx.Client | None = None) -> EmbeddingProvider:
+def build_provider(config: EmbedConfig, http_client: httpx.AsyncClient | None = None) -> EmbeddingProvider:
     if config.provider == "none":
         return NullProvider()
     if config.provider == "ollama":

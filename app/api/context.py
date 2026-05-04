@@ -23,6 +23,12 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.context_builders import (
+    build_context_index,
+    build_dataset_payload,
+    build_graph_payload,
+    build_tool_payload,
+)
 from app.schemas.dataset import DatasetRecord
 from app.schemas.tool import ToolRecord
 from app.store import SqliteStore, get_store
@@ -165,43 +171,8 @@ class GraphContext(BaseModel):
 def get_context_index(
     store: Annotated[SqliteStore, Depends(get_store)],
 ) -> ContextIndex:
-    datasets = store.list_datasets()
-    tools = store.list_tools()
-    rel_count = len(store.adjacency())
-
-    ds_entries = []
-    for d in datasets.values():
-        rec = DatasetRecord(**d)
-        ds_entries.append(
-            DatasetIndexEntry(
-                key=rec.dataset_key,
-                display_name=rec.display_name,
-                llm_summary=rec.llm_summary,
-                capabilities=list(rec.retrieval_capabilities),
-                entity_types=rec.entity_types,
-                access_patterns=rec.access_patterns,
-                status=rec.status,
-            )
-        )
-
-    tool_entries = []
-    for t in tools.values():
-        rec = ToolRecord(**t)
-        tool_entries.append(
-            ToolIndexEntry(
-                key=rec.tool_key,
-                name=rec.name,
-                llm_summary=rec.llm_summary,
-                capability_tags=rec.capability_tags,
-                status=rec.status,
-            )
-        )
-
-    return ContextIndex(
-        datasets=ds_entries,
-        tools=tool_entries,
-        relationship_count=rel_count,
-    )
+    payload = build_context_index(store)
+    return ContextIndex(**payload)
 
 
 @router.get(
@@ -222,23 +193,13 @@ def get_dataset_context(
     if not data:
         raise HTTPException(status_code=404, detail="dataset not found")
     rec = DatasetRecord(**data)
+    payload = build_dataset_payload(rec)
     return DatasetContext(
         key=rec.dataset_key,
-        display_name=rec.display_name,
-        llm_summary=rec.llm_summary,
-        semantic_description=rec.semantic_description,
-        usage_guidance=rec.usage_guidance,
-        capabilities=list(rec.retrieval_capabilities),
-        content_kind=rec.content_kind,
-        entity_types=rec.entity_types,
-        access_patterns=rec.access_patterns,
-        filterable_fields=rec.filterable_fields,
-        field_descriptions=[fd.model_dump() for fd in rec.field_descriptions],
-        query_examples=[qe.model_dump() for qe in rec.query_examples],
-        relationship_hints=rec.relationship_hints,
+        capabilities=payload["retrieval_capabilities"],
         retrieval_profiles=[rp.model_dump() for rp in rec.retrieval_profiles],
-        status=rec.status,
         schema_version=rec.schema_version,
+        **{k: v for k, v in payload.items() if k not in ("dataset_key", "retrieval_capabilities")},
     )
 
 
@@ -260,19 +221,8 @@ def get_tool_context(
     if not data:
         raise HTTPException(status_code=404, detail="tool not found")
     rec = ToolRecord(**data)
-    return ToolContext(
-        key=rec.tool_key,
-        name=rec.name,
-        llm_summary=rec.llm_summary,
-        description=rec.description,
-        capability_tags=rec.capability_tags,
-        safety_scope=rec.safety_scope,
-        input_schema_ref=rec.input_schema_ref,
-        output_schema_ref=rec.output_schema_ref,
-        query_examples=[qe.model_dump() for qe in rec.query_examples],
-        relationship_hints=rec.relationship_hints,
-        status=rec.status,
-    )
+    payload = build_tool_payload(rec)
+    return ToolContext(key=rec.tool_key, **{k: v for k, v in payload.items() if k != "tool_key"})
 
 
 @router.get(
@@ -288,18 +238,5 @@ def get_tool_context(
 def get_context_graph(
     store: Annotated[SqliteStore, Depends(get_store)],
 ) -> GraphContext:
-    edges = store.adjacency()
-    result = []
-    for e in edges:
-        result.append(
-            GraphContextEdge(
-                from_key=e["source_key"],
-                from_type=e["source_type"],
-                to_key=e["target_key"],
-                to_type=e["target_type"],
-                edge_type=e["edge_type"],
-                description=e.get("description", ""),
-                join_fields=e.get("join_fields", []),
-            )
-        )
-    return GraphContext(edges=result)
+    payload = build_graph_payload(store)
+    return GraphContext(**payload)

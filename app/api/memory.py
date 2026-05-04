@@ -6,7 +6,7 @@ POST /datasets/{key}/re-embed       — re-vectorize all items with current embe
 GET  /datasets/{key}/items          — list stored items (paginated; skip soft-deleted).
 GET  /datasets/{key}/items/{id}     — get one item.
 DELETE /datasets/{key}/items/{id}   — soft-delete (recoverable).
-DELETE /datasets/{key}/items/{id}/hard — hard-delete (irreversible).
+DELETE /datasets/{key}/items/{id}/hard — hard-delete (irreversible; cascades relationships).
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def _resolve_search_mode(body: "SearchRequest") -> str:
         "Re-embedding is possible later because the raw text is always preserved."
     ),
 )
-def ingest_items(
+async def ingest_items(
     dataset_key: str,
     body: IngestRequest,
     store: Annotated[SqliteStore, Depends(get_store)],
@@ -82,7 +82,7 @@ def ingest_items(
         )
 
     texts = [item.raw_text for item in body.items]
-    vectors = embed_svc.embed(texts)
+    vectors = await embed_svc.embed(texts)
     model_id = embed_svc.model_id
 
     ids = []
@@ -113,7 +113,7 @@ def ingest_items(
         "key-value pairs before scoring. Returns top-k hits with scores."
     ),
 )
-def search_items(
+async def search_items(
     dataset_key: str,
     body: SearchRequest,
     store: Annotated[SqliteStore, Depends(get_store)],
@@ -138,7 +138,7 @@ def search_items(
     query_vector: list[float] | None = None
     model_id: str | None = None
     if needs_embedding:
-        query_vector = embed_svc.embed_one(body.query)
+        query_vector = await embed_svc.embed_one(body.query)
         model_id = embed_svc.model_id
 
     raw_results = store.search_memory_items(
@@ -226,6 +226,7 @@ def get_item(
     description=(
         "Marks the item as deleted. It is excluded from all queries by default "
         "but can be retrieved using include_deleted=true on the list endpoint. "
+        "Relationships referencing this item are preserved (item is recoverable). "
         "Use DELETE .../hard to permanently remove the row."
     ),
 )
@@ -246,7 +247,10 @@ def delete_item(
 @router.delete(
     "/datasets/{dataset_key}/items/{item_id}/hard",
     summary="Hard-delete a memory item",
-    description="Permanently removes the memory item row from the database. Irreversible.",
+    description=(
+        "Permanently removes the memory item row from the database. Irreversible. "
+        "Also deletes any relationships that reference this item as source or target."
+    ),
 )
 def hard_delete_item(
     dataset_key: str,
@@ -256,7 +260,9 @@ def hard_delete_item(
     row = store.get_memory_item(item_id)
     if not row or row["dataset_key"] != dataset_key:
         raise HTTPException(status_code=404, detail="item not found")
-    store.delete_memory_item(item_id)
+    deleted = store.delete_memory_item(item_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="item not found")
     return {"hard_deleted": item_id}
 
 
@@ -270,7 +276,7 @@ def hard_delete_item(
         "Items are processed in batches. Returns counts of updated and failed items."
     ),
 )
-def re_embed_dataset(
+async def re_embed_dataset(
     dataset_key: str,
     store: Annotated[SqliteStore, Depends(get_store)],
     embed_svc: Annotated[EmbeddingService, Depends(get_embedding_service)],
@@ -298,7 +304,7 @@ def re_embed_dataset(
         batch = items[i : i + batch_size]
         texts = [it["raw_text"] for it in batch]
         try:
-            vectors = embed_svc.embed(texts)
+            vectors = await embed_svc.embed(texts)
         except Exception:
             failed += len(batch)
             continue
@@ -310,7 +316,6 @@ def re_embed_dataset(
             except Exception:
                 failed += 1
 
-    # Rebuild the ANN index now that embeddings (and possibly the dimension) have changed.
     vec_indexed = store.rebuild_vec_index(dataset_key)
 
     return {
