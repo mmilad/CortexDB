@@ -31,3 +31,6 @@ htmlcov/
 Thumbs.db
 cortexdb.sqlite
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.cortexdb/

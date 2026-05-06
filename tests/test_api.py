@@ -422,6 +422,111 @@ def test_capabilities(client):
 
 
 # ---------------------------------------------------------------------------
+# Namespaces
+# ---------------------------------------------------------------------------
+
+def test_namespace_tools_are_isolated(client):
+    r_create = client.post("/create_namespace", json={"namespace": "chat_project"})
+    assert r_create.status_code == 200
+    assert r_create.json()["api_root"] == "/chat_project"
+
+    r_tool = client.post(
+        "/chat_project/tools",
+        json={
+            "tool_key": "chat_tool",
+            "name": "Chat Tool",
+            "description": "A namespace-specific tool",
+            "status": "active",
+        },
+    )
+    assert r_tool.status_code == 200
+
+    r_namespace_tools = client.get("/chat_project/tools")
+    assert r_namespace_tools.status_code == 200
+    assert "chat_tool" in [t["tool_key"] for t in r_namespace_tools.json()]
+
+    r_default_tools = client.get("/tools")
+    assert r_default_tools.status_code == 200
+    assert "chat_tool" not in [t["tool_key"] for t in r_default_tools.json()]
+
+    r_namespaces = client.get("/namespaces")
+    assert r_namespaces.status_code == 200
+    assert "chat_project" in r_namespaces.json()
+
+
+def test_namespace_subspace_tools_are_isolated(client):
+    r_namespace = client.post("/create_namespace", json={"namespace": "book_app"})
+    assert r_namespace.status_code == 200
+
+    r_dev = client.post("/book_app/new_subspace", json={"subspace": "dev"})
+    assert r_dev.status_code == 200
+    assert r_dev.json()["api_root"] == "/book_app/dev"
+
+    r_prod = client.post("/book_app/new_subspace", json={"subspace": "prod"})
+    assert r_prod.status_code == 200
+    assert r_prod.json()["api_root"] == "/book_app/prod"
+
+    parent_tool = {
+        "tool_key": "parent_tool",
+        "name": "Parent Tool",
+        "description": "A namespace-level tool",
+        "status": "active",
+    }
+    dev_tool = {
+        "tool_key": "dev_tool",
+        "name": "Dev Tool",
+        "description": "A dev subspace tool",
+        "status": "active",
+    }
+    prod_tool = {
+        "tool_key": "prod_tool",
+        "name": "Prod Tool",
+        "description": "A prod subspace tool",
+        "status": "active",
+    }
+
+    assert client.post("/book_app/tools", json=parent_tool).status_code == 200
+    assert client.post("/book_app/dev/tools", json=dev_tool).status_code == 200
+    assert client.post("/book_app/prod/tools", json=prod_tool).status_code == 200
+
+    parent_keys = [t["tool_key"] for t in client.get("/book_app/tools").json()]
+    dev_keys = [t["tool_key"] for t in client.get("/book_app/dev/tools").json()]
+    prod_keys = [t["tool_key"] for t in client.get("/book_app/prod/tools").json()]
+
+    assert "parent_tool" in parent_keys
+    assert "dev_tool" not in parent_keys
+    assert "prod_tool" not in parent_keys
+
+    assert dev_keys == ["dev_tool"]
+    assert prod_keys == ["prod_tool"]
+
+    r_subspaces = client.get("/book_app/subspaces")
+    assert r_subspaces.status_code == 200
+    assert r_subspaces.json() == ["dev", "prod"]
+
+
+def test_namespace_and_subspace_docs_are_scoped(client):
+    client.post("/create_namespace", json={"namespace": "docs_app"})
+    client.post("/docs_app/new_subspace", json={"subspace": "dev"})
+
+    r_namespace_docs = client.get("/docs_app/docs")
+    assert r_namespace_docs.status_code == 200
+    assert "swagger-ui" in r_namespace_docs.text
+
+    r_namespace_openapi = client.get("/docs_app/openapi.json")
+    assert r_namespace_openapi.status_code == 200
+    assert r_namespace_openapi.json()["servers"] == [{"url": "/docs_app"}]
+
+    r_subspace_docs = client.get("/docs_app/dev/docs")
+    assert r_subspace_docs.status_code == 200
+    assert "swagger-ui" in r_subspace_docs.text
+
+    r_subspace_openapi = client.get("/docs_app/dev/openapi.json")
+    assert r_subspace_openapi.status_code == 200
+    assert r_subspace_openapi.json()["servers"] == [{"url": "/docs_app/dev"}]
+
+
+# ---------------------------------------------------------------------------
 # MCP
 # ---------------------------------------------------------------------------
 
