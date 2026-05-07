@@ -39,7 +39,7 @@ Registry-oriented MCP calls do not require embedding. Enable embedding secrets o
 
 ### Optional: local API during a run
 
-`.cursor/environment.json` defines a terminal **CortexDB API** that runs `uvicorn` on port 8000 with `CORTEXDB_EMBED_PROVIDER=none` for manual checks or HTTP clients inside the VM (`POST /mcp`, `/docs`, etc.).
+`.cursor/environment.json` can define a terminal **CortexDB API** that runs `cortexdb-api --reload` on port 5000 by default with `CORTEXDB_EMBED_PROVIDER=none` for manual checks or HTTP clients inside the VM (`POST /mcp`, `/docs`, etc.). Override with `CORTEXDB_API_PORT`.
 
 ### Secrets
 

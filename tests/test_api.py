@@ -306,6 +306,14 @@ def test_ingest_requires_embedding(client):
     assert r.status_code == 503
 
 
+def test_ingest_text_requires_embedding(client):
+    r = client.post(
+        "/datasets/test_ds/ingest/text",
+        json={"text": "hello\n\nworld", "max_chars": 10, "overlap_chars": 2},
+    )
+    assert r.status_code == 503
+
+
 def test_search_keyword_only(client):
     """Keyword-only search works even when embedding is disabled."""
     # Insert a raw item manually via the store so we can test search without embed

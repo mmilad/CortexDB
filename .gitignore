@@ -34,3 +34,5 @@ cortexdb.sqlite
 *.sqlite-shm
 *.sqlite-wal
 .cortexdb/
+
+.test_tmp

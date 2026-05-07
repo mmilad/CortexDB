@@ -13,7 +13,7 @@ Demonstrates the full LLM-agent workflow against a running CortexDB server:
 Requirements
 ------------
 * CortexDB running locally:
-    uvicorn app.main:app --reload
+    cortexdb-api --reload
 
 * Ollama with nomic-embed-text (default), OR set env vars for an
   OpenAI-compatible provider:
@@ -24,7 +24,7 @@ Requirements
 
 Run
 ---
-    python examples/quickstart.py [--base-url http://127.0.0.1:8000]
+    python examples/quickstart.py [--base-url http://127.0.0.1:5000]
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import sys
 
 import httpx
 
-DEFAULT_BASE = "http://127.0.0.1:8000"
+DEFAULT_BASE = "http://127.0.0.1:5000"
 
 
 def _check(r: httpx.Response, label: str) -> dict:

@@ -11,12 +11,13 @@ DELETE /datasets/{key}/items/{id}/hard — hard-delete (irreversible; cascades r
 
 from __future__ import annotations
 
-import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.embed.service import EmbeddingService, get_embedding_service
+from app.ingest.service import ingest_source_to_dataset
+from app.schemas.ingest import IngestTextRequest
 from app.schemas.memory import (
     IngestRequest,
     IngestResult,
@@ -24,6 +25,11 @@ from app.schemas.memory import (
     SearchHit,
     SearchRequest,
     SearchResponse,
+)
+from app.services.memory import (
+    DatasetNotFoundError,
+    EmbeddingDisabledError,
+    ingest_items_to_dataset,
 )
 from app.store import SqliteStore, get_store
 
@@ -52,6 +58,14 @@ def _resolve_search_mode(body: "SearchRequest") -> str:
     return "vector"
 
 
+def _raise_ingest_http_error(exc: Exception) -> None:
+    if isinstance(exc, DatasetNotFoundError):
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if isinstance(exc, EmbeddingDisabledError):
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    raise exc
+
+
 @router.post(
     "/datasets/{dataset_key}/ingest",
     response_model=IngestResult,
@@ -69,38 +83,46 @@ async def ingest_items(
     store: Annotated[SqliteStore, Depends(get_store)],
     embed_svc: Annotated[EmbeddingService, Depends(get_embedding_service)],
 ) -> IngestResult:
-    if not store.get_dataset(dataset_key):
-        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_key}' not found")
+    try:
+        return await ingest_items_to_dataset(dataset_key, body.items, store, embed_svc)
+    except Exception as exc:
+        _raise_ingest_http_error(exc)
+        raise
 
-    if not embed_svc.is_enabled():
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Embedding is disabled (CORTEXDB_EMBED_PROVIDER=none). "
-                "Set CORTEXDB_EMBED_PROVIDER=ollama or =api to enable ingest."
-            ),
+
+@router.post(
+    "/datasets/{dataset_key}/ingest/text",
+    response_model=IngestResult,
+    summary="Chunk and ingest a raw text source into a dataset",
+    description=(
+        "Thin adapter over the reusable ingest pipeline. The pipeline chunks raw "
+        "text into IngestItem-compatible records, then delegates to the existing "
+        "CortexDB ingest path for embedding and storage."
+    ),
+)
+async def ingest_text_source(
+    dataset_key: str,
+    body: IngestTextRequest,
+    store: Annotated[SqliteStore, Depends(get_store)],
+    embed_svc: Annotated[EmbeddingService, Depends(get_embedding_service)],
+) -> IngestResult:
+    try:
+        return await ingest_source_to_dataset(
+            dataset_key,
+            body.text,
+            store,
+            embed_svc,
+            max_chars=body.max_chars,
+            overlap_chars=body.overlap_chars,
+            metadata=body.metadata,
+            ingestion_id=body.ingestion_id,
+            batch_size=body.batch_size,
         )
-
-    texts = [item.raw_text for item in body.items]
-    vectors = await embed_svc.embed(texts)
-    model_id = embed_svc.model_id
-
-    ids = []
-    for item, vector in zip(body.items, vectors):
-        item_id = item.id or str(uuid.uuid4())
-        store.insert_memory_item(
-            {
-                "id": item_id,
-                "dataset_key": dataset_key,
-                "raw_text": item.raw_text,
-                "metadata": item.metadata,
-                "embedding": vector,
-                "embedding_model": model_id,
-            }
-        )
-        ids.append(item_id)
-
-    return IngestResult(ingested=len(ids), ids=ids, embedding_model=model_id)
+    except (DatasetNotFoundError, EmbeddingDisabledError) as exc:
+        _raise_ingest_http_error(exc)
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post(
