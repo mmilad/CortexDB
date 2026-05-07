@@ -3,6 +3,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends
 
 from app.embed.service import EmbeddingService, get_embedding_service
+from app.llm import LLMService, get_llm_service
 from app.store import SqliteStore, get_store
 
 router = APIRouter(tags=["capabilities"])
@@ -12,6 +13,7 @@ router = APIRouter(tags=["capabilities"])
 def capabilities(
     store: Annotated[SqliteStore, Depends(get_store)],
     embed_svc: Annotated[EmbeddingService, Depends(get_embedding_service)],
+    llm_svc: Annotated[LLMService, Depends(get_llm_service)],
 ) -> dict[str, Any]:
     datasets = store.list_datasets()
     tools = store.list_tools()
@@ -20,6 +22,12 @@ def capabilities(
         "service": "cortexdb",
         "version": "0.3.0",
         "llm_inside": False,
+        "llm_provider": {
+            "enabled": llm_svc.is_enabled(),
+            "provider": llm_svc.provider,
+            "model_id": llm_svc.model if llm_svc.is_enabled() else None,
+            "url": llm_svc.url if llm_svc.is_enabled() else None,
+        },
         "embedding": {
             "enabled": embed_svc.is_enabled(),
             "model_id": embed_svc.model_id if embed_svc.is_enabled() else None,

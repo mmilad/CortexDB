@@ -30,7 +30,16 @@ from app.context_builders import (
     build_tool_payload,
 )
 from app.schemas.dataset import DatasetRecord
+from app.schemas.session import (
+    ContextItem,
+    ContextPackage,
+    ContextRequest,
+    SessionMessageRecord,
+    SessionRecord,
+    SessionSummaryRecord,
+)
 from app.schemas.tool import ToolRecord
+from app.services.session import ensure_session
 from app.store import SqliteStore, get_store
 
 router = APIRouter(prefix="/context", tags=["context"])
@@ -240,3 +249,69 @@ def get_context_graph(
 ) -> GraphContext:
     payload = build_graph_payload(store)
     return GraphContext(**payload)
+
+
+@router.post(
+    "",
+    response_model=ContextPackage,
+    summary="Build a session-aware context package",
+    description=(
+        "Returns prompt-ready context from session history, session summaries, "
+        "and relevant dataset memory. Disabled session chunks are represented "
+        "through summaries instead of detailed messages."
+    ),
+)
+def build_context_package(
+    body: ContextRequest,
+    store: Annotated[SqliteStore, Depends(get_store)],
+) -> ContextPackage:
+    session = ensure_session(store, session_id=body.session_id)
+    summaries = [
+        SessionSummaryRecord(**row)
+        for row in store.list_session_summaries(session.id)
+    ]
+    messages = [
+        SessionMessageRecord(**row)
+        for row in store.list_session_messages(
+            session.id,
+            limit=body.top_k * 2,
+            autocontext_only=True,
+        )
+    ]
+
+    dataset_keys = body.dataset_keys or list(store.list_datasets().keys())
+    items: list[ContextItem] = []
+    for dataset_key in dataset_keys:
+        if not store.get_dataset(dataset_key):
+            continue
+        for row in store.search_memory_items(
+            dataset_key=dataset_key,
+            query_vector=None,
+            top_k=body.top_k,
+            keyword_query=body.prompt,
+            vector_weight=0.0,
+        ):
+            items.append(
+                ContextItem(
+                    kind="memory_item",
+                    text=row["raw_text"],
+                    source_id=row["id"],
+                    dataset_key=dataset_key,
+                    score=row.get("score"),
+                    metadata=row.get("metadata", {}),
+                )
+            )
+
+    items.sort(key=lambda item: item.score or 0.0, reverse=True)
+    return ContextPackage(
+        session=SessionRecord(**session.model_dump()),
+        prompt=body.prompt,
+        summaries=summaries,
+        messages=messages,
+        items=items[: body.top_k],
+        dataset_keys=dataset_keys,
+        usage_hint=(
+            "Use summaries for compacted history, messages for recent chat turns, "
+            "and items for dataset-backed memory. Final reasoning remains outside CortexDB."
+        ),
+    )

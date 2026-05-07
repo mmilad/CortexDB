@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-NodeType = Literal["dataset", "tool"]
+NodeType = Literal["dataset", "tool", "session", "session_message", "raw_text", "memory_item"]
 EdgeType = Literal[
     "joins_on",       # datasets joined on shared fields
     "feeds_into",     # one dataset/tool produces data consumed by another

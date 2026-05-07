@@ -40,11 +40,13 @@ CortexDB is a **LLM-native memory and retrieval layer** for agentic systems.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[vec]"     # includes sqlite-vec for ANN search
-uvicorn app.main:app --reload
+cortexdb-api --reload       # defaults to http://127.0.0.1:5000
 ```
 
 Storage: `cortexdb.sqlite` in the working directory.
 Override: `CORTEXDB_DB_PATH=/path/to/file.sqlite`
+API port override: `CORTEXDB_API_PORT=5001 cortexdb-api --reload`
+Editable local defaults: copy `.env.example` or export the `CORTEXDB_API_*` variables in your shell before starting the server.
 
 Embedding defaults to **nomic-embed-text via Ollama**. On startup CortexDB
 checks if Ollama is running; if not, it starts `ollama serve` and pulls the
@@ -56,18 +58,21 @@ CORTEXDB_EMBED_PROVIDER=api \
 CORTEXDB_EMBED_URL=https://api.openai.com \
 CORTEXDB_EMBED_MODEL=text-embedding-3-small \
 CORTEXDB_EMBED_API_KEY=sk-... \
-uvicorn app.main:app --reload
+cortexdb-api --reload
 
-# Disable embedding entirely (registry + MCP reads still work)
-CORTEXDB_EMBED_PROVIDER=none uvicorn app.main:app --reload
+# Disable embedding entirely
+CORTEXDB_EMBED_PROVIDER=none cortexdb-api --reload
 ```
 
 Callers **never send vectors** — only raw text. CortexDB handles vectorization.
 Raw text is always stored, enabling re-embedding when models change.
 
-API docs: `http://127.0.0.1:8000/docs`
+API docs: `http://127.0.0.1:5000/docs`
 
 End-to-end example: `python examples/quickstart.py`
+
+For deterministic chunking of text, Markdown files, and directories before
+ingest, see the [Ingest Pipeline usage guide](./docs/USAGE.md#ingest-pipeline).
 
 ## Testing
 

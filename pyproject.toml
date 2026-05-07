@@ -13,6 +13,7 @@ dependencies = [
 # Embedding: httpx calls to Ollama (default) or any OpenAI-compatible API.
 
 [project.scripts]
+cortexdb-api = "app.serve:main"
 # Local MCP stdio server — use with Claude Desktop, Cursor, Continue, etc.
 # Example claude_desktop_config.json entry:
 #   { "command": "cortexdb-mcp", "args": [] }

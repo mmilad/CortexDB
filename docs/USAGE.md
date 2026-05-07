@@ -6,23 +6,24 @@
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[vec]"     # includes sqlite-vec for ANN search
-uvicorn app.main:app --reload
+cortexdb-api --reload
 ```
 
 Storage defaults to `cortexdb.sqlite` in the working directory.
 Override with `CORTEXDB_DB_PATH=/path/to/file.sqlite`.
+The API port defaults to `5000`; override with `CORTEXDB_API_PORT=5001`.
 
 Disable embedding (faster startup, registry + MCP reads still work):
 
 ```bash
-CORTEXDB_EMBED_PROVIDER=none uvicorn app.main:app --reload
+CORTEXDB_EMBED_PROVIDER=none cortexdb-api --reload
 ```
 
 ## Open docs
 
-- Swagger UI: `http://127.0.0.1:8000/docs`
-- OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
-- Health check: `http://127.0.0.1:8000/health`
+- Swagger UI: `http://127.0.0.1:5000/docs`
+- OpenAPI JSON: `http://127.0.0.1:5000/openapi.json`
+- Health check: `http://127.0.0.1:5000/health`
 
 ---
 
@@ -53,7 +54,7 @@ For MCP-native agents:
 ### Create / update a dataset (rich LLM metadata)
 
 ```bash
-curl -X POST http://127.0.0.1:8000/datasets \
+curl -X POST http://127.0.0.1:5000/datasets \
   -H "Content-Type: application/json" \
   -d '{
     "dataset_key": "tech_knowledge",
@@ -83,7 +84,7 @@ curl -X POST http://127.0.0.1:8000/datasets \
 ### List all datasets
 
 ```bash
-curl http://127.0.0.1:8000/datasets
+curl http://127.0.0.1:5000/datasets
 ```
 
 ### Get a single dataset
@@ -103,7 +104,7 @@ curl -X DELETE http://127.0.0.1:8000/datasets/tech_knowledge
 ### Discover or match a dataset by intent
 
 ```bash
-curl -X POST http://127.0.0.1:8000/datasets/discover \
+curl -X POST http://127.0.0.1:5000/datasets/discover \
   -H "Content-Type: application/json" \
   -d '{
     "intent": "store engineering runbooks for semantic search",
@@ -220,12 +221,132 @@ curl -X POST "http://127.0.0.1:8000/datasets/tech_knowledge/re-embed?batch_size=
 
 ---
 
+## Ingest Pipeline
+
+CortexDB includes a reusable deterministic ingest pipeline for preparing text,
+Markdown, and plain text files for the existing dataset ingest path. Callers
+still provide raw content only; CortexDB owns embedding and storage. Actual
+ingest requires an enabled embedding provider.
+
+### Session-aware ingest front door
+
+Use `POST /ingest` when CortexDB should act as middleware for a chat,
+assistant, or A2A workflow. This endpoint always stores both chat history and
+an auditable raw text record. Derived work such as summaries, facts, decisions,
+goals, and knowledge extraction is reported separately and never blocks the
+durable session/raw write.
+
+```bash
+curl -X POST http://127.0.0.1:5000/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "main",
+    "role": "user",
+    "text": "Remember that the API worker must restart after credential rotation.",
+    "source": "user_prompt",
+    "dataset_policy": "create_if_needed",
+    "metadata": {"app": "assistant-ui"}
+  }'
+```
+
+If `session_id` is omitted, CortexDB uses the default `main` session. Session
+scope defaults to the current namespace. Set `scope_mode` to `global` or
+`explicit` when the consuming app wants a different retrieval boundary.
+
+Configure optional LLM extraction with an OpenAI-compatible endpoint:
+
+```bash
+CORTEXDB_LLM_PROVIDER=api \
+CORTEXDB_LLM_URL=https://api.openai.com \
+CORTEXDB_LLM_MODEL=gpt-4.1-mini \
+CORTEXDB_LLM_API_KEY=sk-... \
+cortexdb-api --reload
+```
+
+Without an LLM provider, `/ingest` still writes `sessions`,
+`session_messages`, and `raw_texts`; the derived jobs return `skipped`.
+
+Fetch chat history and prompt-ready context:
+
+```bash
+curl http://127.0.0.1:5000/sessions/main/history
+
+curl -X POST http://127.0.0.1:5000/context \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "main", "prompt": "credential rotation restart", "top_k": 5}'
+```
+
+### Build chunks from a Markdown file
+
+```python
+from pathlib import Path
+
+from app.ingest import build_ingest_items
+
+items = build_ingest_items(
+    Path("docs/runbook.md"),
+    max_chars=2000,
+    overlap_chars=200,
+    metadata={"component": "api"},
+)
+
+for item in items:
+    print(item.id, item.metadata["chunk_index"], item.raw_text[:80])
+```
+
+Each generated item is compatible with `POST /datasets/{key}/ingest` and
+includes metadata such as `source_type`, `source_path`, `filename`,
+`chunk_index`, `chunk_count`, content/source SHA-256 hashes, and `ingestion_id`.
+
+### Ingest a directory from Python
+
+```python
+from pathlib import Path
+
+from app.embed.service import get_embedding_service
+from app.ingest import ingest_directory_to_dataset
+from app.store import get_store
+
+result = await ingest_directory_to_dataset(
+    "tech_knowledge",
+    Path("docs"),
+    get_store(),
+    get_embedding_service(),
+    max_chars=2000,
+    overlap_chars=200,
+    batch_size=100,
+)
+print(result.ingested, result.ids)
+```
+
+Directory traversal is recursive and deterministic. Only `.txt` and `.md`
+files are included; unsupported files are ignored.
+
+### Chunk and ingest text over HTTP
+
+```bash
+curl -X POST http://127.0.0.1:5000/datasets/tech_knowledge/ingest/text \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "# Runbook\n\nRestart the API worker after rotating credentials.",
+    "metadata": {"component": "api", "kind": "runbook"},
+    "max_chars": 2000,
+    "overlap_chars": 200,
+    "batch_size": 100
+  }'
+```
+
+Do not send vectors to CortexDB. The pipeline only prepares raw text chunks and
+metadata, then delegates to the existing ingest service for embedding.
+
+---
+
 ## Tools
 
 ### Create / update a tool
 
 ```bash
-curl -X POST http://127.0.0.1:8000/tools \
+curl -X POST http://127.0.0.1:5000/tools \
   -H "Content-Type: application/json" \
   -d '{
     "tool_key": "log_search",
@@ -269,7 +390,7 @@ curl -X DELETE http://127.0.0.1:8000/tools/log_search
 ### Declare a typed edge between nodes
 
 ```bash
-curl -X POST http://127.0.0.1:8000/relationships \
+curl -X POST http://127.0.0.1:5000/relationships \
   -H "Content-Type: application/json" \
   -d '{
     "id": "rel-001",
@@ -288,7 +409,7 @@ Edge types: `joins_on`, `feeds_into`, `shared_entity`, `produces`, `consumes`, `
 ### List edges touching a node
 
 ```bash
-curl "http://127.0.0.1:8000/relationships?node_key=tech_knowledge"
+curl "http://127.0.0.1:5000/relationships?node_key=tech_knowledge"
 ```
 
 ### Get a single relationship
@@ -310,25 +431,25 @@ curl -X DELETE http://127.0.0.1:8000/relationships/rel-001
 ### Minimal orientation index (call this first)
 
 ```bash
-curl http://127.0.0.1:8000/context/index
+curl http://127.0.0.1:5000/context/index
 ```
 
 ### Full context for one dataset (query guidance + examples)
 
 ```bash
-curl http://127.0.0.1:8000/context/dataset/tech_knowledge
+curl http://127.0.0.1:5000/context/dataset/tech_knowledge
 ```
 
 ### Full context for one tool
 
 ```bash
-curl http://127.0.0.1:8000/context/tool/log_search
+curl http://127.0.0.1:5000/context/tool/log_search
 ```
 
 ### Compact relationship map
 
 ```bash
-curl http://127.0.0.1:8000/context/graph
+curl http://127.0.0.1:5000/context/graph
 ```
 
 ---
@@ -338,7 +459,7 @@ curl http://127.0.0.1:8000/context/graph
 ### BFS from a starting node (depth 1–5)
 
 ```bash
-curl "http://127.0.0.1:8000/graph/explore?start=dataset:tech_knowledge&depth=2"
+curl "http://127.0.0.1:5000/graph/explore?start=dataset:tech_knowledge&depth=2"
 ```
 
 Response shape:
@@ -361,7 +482,7 @@ discoverable — no code changes or restarts needed when new items are added.
 ### Initialize
 
 ```bash
-curl -X POST http://127.0.0.1:8000/mcp \
+curl -X POST http://127.0.0.1:5000/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"my-agent"}}}'
 ```
@@ -369,7 +490,7 @@ curl -X POST http://127.0.0.1:8000/mcp \
 ### List all resources (datasets + tools + static resources)
 
 ```bash
-curl -X POST http://127.0.0.1:8000/mcp \
+curl -X POST http://127.0.0.1:5000/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":2,"method":"resources/list","params":{}}'
 ```
@@ -377,7 +498,7 @@ curl -X POST http://127.0.0.1:8000/mcp \
 ### Read context index (minimal orientation)
 
 ```bash
-curl -X POST http://127.0.0.1:8000/mcp \
+curl -X POST http://127.0.0.1:5000/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"cortexdb://context/index"}}'
 ```
@@ -385,7 +506,7 @@ curl -X POST http://127.0.0.1:8000/mcp \
 ### Read full dataset context
 
 ```bash
-curl -X POST http://127.0.0.1:8000/mcp \
+curl -X POST http://127.0.0.1:5000/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"cortexdb://datasets/tech_knowledge"}}'
 ```
@@ -393,7 +514,7 @@ curl -X POST http://127.0.0.1:8000/mcp \
 ### Read relationship graph
 
 ```bash
-curl -X POST http://127.0.0.1:8000/mcp \
+curl -X POST http://127.0.0.1:5000/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"cortexdb://graph"}}'
 ```
@@ -401,7 +522,7 @@ curl -X POST http://127.0.0.1:8000/mcp \
 ### List MCP tools
 
 ```bash
-curl -X POST http://127.0.0.1:8000/mcp \
+curl -X POST http://127.0.0.1:5000/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":6,"method":"tools/list","params":{}}'
 ```
