@@ -21,6 +21,17 @@ from app.schemas.memory import (
     SearchRequest,
     SearchResponse,
 )
+from app.schemas.session import (
+    ContextPackage,
+    ContextRequest,
+    DerivedJobResult,
+    IngestRequest as SessionIngestRequest,
+    IngestResult as SessionIngestResult,
+    RawTextRecord,
+    SessionMessageRecord,
+    SessionRecord,
+    SessionSummaryRecord,
+)
 from app.schemas.relationship import (
     EdgeType,
     GraphEdge,
@@ -46,6 +57,15 @@ __all__ = [
     "IngestItem",
     "IngestRequest",
     "IngestResult",
+    "SessionRecord",
+    "RawTextRecord",
+    "SessionMessageRecord",
+    "SessionSummaryRecord",
+    "SessionIngestRequest",
+    "SessionIngestResult",
+    "DerivedJobResult",
+    "ContextRequest",
+    "ContextPackage",
     "MemoryItem",
     "NodeType",
     "QueryExample",

@@ -79,6 +79,56 @@ CREATE TABLE IF NOT EXISTS relationships (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+    id             TEXT PRIMARY KEY,
+    type           TEXT NOT NULL DEFAULT 'chat',
+    scope_mode     TEXT NOT NULL DEFAULT 'namespace',
+    namespace      TEXT,
+    dataset_policy TEXT NOT NULL DEFAULT 'create_if_needed',
+    metadata       TEXT NOT NULL DEFAULT '{}',
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS raw_texts (
+    id              TEXT PRIMARY KEY,
+    text            TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'unknown',
+    relations       TEXT NOT NULL DEFAULT '{}',
+    score           REAL,
+    metadata        TEXT NOT NULL DEFAULT '{}',
+    embedding       TEXT,
+    embedding_model TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS session_summaries (
+    id            TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL,
+    summary       TEXT NOT NULL,
+    message_ids   TEXT NOT NULL DEFAULT '[]',
+    token_estimate INTEGER NOT NULL DEFAULT 0,
+    metadata      TEXT NOT NULL DEFAULT '{}',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS session_messages (
+    id                  TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL,
+    role                TEXT NOT NULL,
+    content             TEXT NOT NULL,
+    raw_text_id         TEXT,
+    token_estimate      INTEGER NOT NULL DEFAULT 0,
+    autocontext_enabled INTEGER NOT NULL DEFAULT 1,
+    summary_id          TEXT,
+    metadata            TEXT NOT NULL DEFAULT '{}',
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (session_id) REFERENCES sessions(id),
+    FOREIGN KEY (raw_text_id) REFERENCES raw_texts(id),
+    FOREIGN KEY (summary_id) REFERENCES session_summaries(id)
+);
+
 CREATE TABLE IF NOT EXISTS memory_items (
     id              TEXT PRIMARY KEY,
     dataset_key     TEXT NOT NULL,
@@ -94,6 +144,9 @@ CREATE TABLE IF NOT EXISTS memory_items (
 CREATE INDEX IF NOT EXISTS idx_rel_source    ON relationships (source_type, source_key);
 CREATE INDEX IF NOT EXISTS idx_rel_target    ON relationships (target_type, target_key);
 CREATE INDEX IF NOT EXISTS idx_items_dataset ON memory_items (dataset_key);
+CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_raw_texts_created ON raw_texts (created_at);
+CREATE INDEX IF NOT EXISTS idx_session_summaries_session ON session_summaries (session_id, created_at);
 """
 
 # Additive migrations — run idempotently on every startup.
@@ -379,6 +432,219 @@ class SqliteStore:
     def _row_to_rel(row: sqlite3.Row) -> dict[str, Any]:
         d = dict(row)
         d["join_fields"] = json.loads(d["join_fields"])
+        return d
+
+    # ------------------------------------------------------------------
+    # Sessions and raw text audit
+    # ------------------------------------------------------------------
+
+    def upsert_session(self, session: dict[str, Any]) -> None:
+        self._conn.execute(
+            """INSERT INTO sessions
+               (id, type, scope_mode, namespace, dataset_policy, metadata)
+               VALUES (:id, :type, :scope_mode, :namespace, :dataset_policy, :metadata)
+               ON CONFLICT(id) DO UPDATE SET
+                 type = excluded.type,
+                 scope_mode = excluded.scope_mode,
+                 namespace = excluded.namespace,
+                 dataset_policy = excluded.dataset_policy,
+                 metadata = excluded.metadata,
+                 updated_at = datetime('now')""",
+            {
+                "id": session["id"],
+                "type": session.get("type", "chat"),
+                "scope_mode": session.get("scope_mode", "namespace"),
+                "namespace": session.get("namespace"),
+                "dataset_policy": session.get("dataset_policy", "create_if_needed"),
+                "metadata": json.dumps(session.get("metadata", {})),
+            },
+        )
+        self._conn.commit()
+
+    def ensure_session(
+        self,
+        session_id: str = "main",
+        *,
+        type: str = "chat",
+        scope_mode: str = "namespace",
+        namespace: str | None = None,
+        dataset_policy: str = "create_if_needed",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        existing = self.get_session(session_id)
+        if existing:
+            return existing
+        self.upsert_session({
+            "id": session_id,
+            "type": type,
+            "scope_mode": scope_mode,
+            "namespace": namespace,
+            "dataset_policy": dataset_policy,
+            "metadata": metadata or {},
+        })
+        created = self.get_session(session_id)
+        if created is None:
+            raise RuntimeError(f"could not create session '{session_id}'")
+        return created
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return self._row_to_session(row) if row else None
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC").fetchall()
+        return [self._row_to_session(r) for r in rows]
+
+    def insert_raw_text(self, raw: dict[str, Any]) -> None:
+        self._conn.execute(
+            """INSERT INTO raw_texts
+               (id, text, source, relations, score, metadata, embedding, embedding_model)
+               VALUES (:id, :text, :source, :relations, :score, :metadata, :embedding, :embedding_model)
+               ON CONFLICT(id) DO UPDATE SET
+                 text = excluded.text,
+                 source = excluded.source,
+                 relations = excluded.relations,
+                 score = excluded.score,
+                 metadata = excluded.metadata,
+                 embedding = excluded.embedding,
+                 embedding_model = excluded.embedding_model""",
+            {
+                "id": raw["id"],
+                "text": raw["text"],
+                "source": raw.get("source", "unknown"),
+                "relations": json.dumps(raw.get("relations", {})),
+                "score": raw.get("score"),
+                "metadata": json.dumps(raw.get("metadata", {})),
+                "embedding": json.dumps(raw.get("embedding")) if raw.get("embedding") else None,
+                "embedding_model": raw.get("embedding_model"),
+            },
+        )
+        self._conn.commit()
+
+    def get_raw_text(self, raw_text_id: str) -> dict[str, Any] | None:
+        row = self._conn.execute("SELECT * FROM raw_texts WHERE id = ?", (raw_text_id,)).fetchone()
+        return self._row_to_raw_text(row) if row else None
+
+    def insert_session_message(self, message: dict[str, Any]) -> None:
+        self._conn.execute(
+            """INSERT INTO session_messages
+               (id, session_id, role, content, raw_text_id, token_estimate,
+                autocontext_enabled, summary_id, metadata)
+               VALUES (:id, :session_id, :role, :content, :raw_text_id, :token_estimate,
+                       :autocontext_enabled, :summary_id, :metadata)
+               ON CONFLICT(id) DO UPDATE SET
+                 role = excluded.role,
+                 content = excluded.content,
+                 raw_text_id = excluded.raw_text_id,
+                 token_estimate = excluded.token_estimate,
+                 autocontext_enabled = excluded.autocontext_enabled,
+                 summary_id = excluded.summary_id,
+                 metadata = excluded.metadata""",
+            {
+                "id": message["id"],
+                "session_id": message["session_id"],
+                "role": message.get("role", "user"),
+                "content": message["content"],
+                "raw_text_id": message.get("raw_text_id"),
+                "token_estimate": message.get("token_estimate", 0),
+                "autocontext_enabled": 1 if message.get("autocontext_enabled", True) else 0,
+                "summary_id": message.get("summary_id"),
+                "metadata": json.dumps(message.get("metadata", {})),
+            },
+        )
+        self._conn.execute("UPDATE sessions SET updated_at = datetime('now') WHERE id = ?", (message["session_id"],))
+        self._conn.commit()
+
+    def list_session_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        autocontext_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM session_messages WHERE session_id = ?"
+        args: list[Any] = [session_id]
+        if autocontext_only:
+            query += " AND autocontext_enabled = 1"
+        query += " ORDER BY created_at ASC LIMIT ? OFFSET ?"
+        args.extend([limit, offset])
+        rows = self._conn.execute(query, args).fetchall()
+        return [self._row_to_session_message(r) for r in rows]
+
+    def insert_session_summary(self, summary: dict[str, Any]) -> None:
+        self._conn.execute(
+            """INSERT INTO session_summaries
+               (id, session_id, summary, message_ids, token_estimate, metadata)
+               VALUES (:id, :session_id, :summary, :message_ids, :token_estimate, :metadata)
+               ON CONFLICT(id) DO UPDATE SET
+                 summary = excluded.summary,
+                 message_ids = excluded.message_ids,
+                 token_estimate = excluded.token_estimate,
+                 metadata = excluded.metadata""",
+            {
+                "id": summary["id"],
+                "session_id": summary["session_id"],
+                "summary": summary["summary"],
+                "message_ids": json.dumps(summary.get("message_ids", [])),
+                "token_estimate": summary.get("token_estimate", 0),
+                "metadata": json.dumps(summary.get("metadata", {})),
+            },
+        )
+        self._conn.commit()
+
+    def list_session_summaries(self, session_id: str) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM session_summaries WHERE session_id = ? ORDER BY created_at ASC",
+            (session_id,),
+        ).fetchall()
+        return [self._row_to_session_summary(r) for r in rows]
+
+    def disable_session_messages_for_autocontext(
+        self,
+        session_id: str,
+        message_ids: list[str],
+        summary_id: str,
+    ) -> int:
+        if not message_ids:
+            return 0
+        placeholders = ",".join("?" for _ in message_ids)
+        cur = self._conn.execute(
+            f"""UPDATE session_messages
+                SET autocontext_enabled = 0, summary_id = ?
+                WHERE session_id = ? AND id IN ({placeholders})""",
+            [summary_id, session_id, *message_ids],
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    @staticmethod
+    def _row_to_session(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        d["metadata"] = json.loads(d["metadata"])
+        return d
+
+    @staticmethod
+    def _row_to_raw_text(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        d["relations"] = json.loads(d["relations"])
+        d["metadata"] = json.loads(d["metadata"])
+        raw_emb = d.pop("embedding", None)
+        d["_embedding_raw"] = json.loads(raw_emb) if raw_emb else None
+        return d
+
+    @staticmethod
+    def _row_to_session_message(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        d["metadata"] = json.loads(d["metadata"])
+        d["autocontext_enabled"] = bool(d.get("autocontext_enabled", 1))
+        return d
+
+    @staticmethod
+    def _row_to_session_summary(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        d["message_ids"] = json.loads(d["message_ids"])
+        d["metadata"] = json.loads(d["metadata"])
         return d
 
     # ------------------------------------------------------------------

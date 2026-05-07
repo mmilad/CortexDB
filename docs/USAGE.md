@@ -101,6 +101,54 @@ Markdown, and plain text files for the existing dataset ingest path. Callers
 still provide raw content only; CortexDB owns embedding and storage. Actual
 ingest requires an enabled embedding provider.
 
+### Session-aware ingest front door
+
+Use `POST /ingest` when CortexDB should act as middleware for a chat,
+assistant, or A2A workflow. This endpoint always stores both chat history and
+an auditable raw text record. Derived work such as summaries, facts, decisions,
+goals, and knowledge extraction is reported separately and never blocks the
+durable session/raw write.
+
+```bash
+curl -X POST http://127.0.0.1:5000/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "main",
+    "role": "user",
+    "text": "Remember that the API worker must restart after credential rotation.",
+    "source": "user_prompt",
+    "dataset_policy": "create_if_needed",
+    "metadata": {"app": "assistant-ui"}
+  }'
+```
+
+If `session_id` is omitted, CortexDB uses the default `main` session. Session
+scope defaults to the current namespace. Set `scope_mode` to `global` or
+`explicit` when the consuming app wants a different retrieval boundary.
+
+Configure optional LLM extraction with an OpenAI-compatible endpoint:
+
+```bash
+CORTEXDB_LLM_PROVIDER=api \
+CORTEXDB_LLM_URL=https://api.openai.com \
+CORTEXDB_LLM_MODEL=gpt-4.1-mini \
+CORTEXDB_LLM_API_KEY=sk-... \
+cortexdb-api --reload
+```
+
+Without an LLM provider, `/ingest` still writes `sessions`,
+`session_messages`, and `raw_texts`; the derived jobs return `skipped`.
+
+Fetch chat history and prompt-ready context:
+
+```bash
+curl http://127.0.0.1:5000/sessions/main/history
+
+curl -X POST http://127.0.0.1:5000/context \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "main", "prompt": "credential rotation restart", "top_k": 5}'
+```
+
 ### Build chunks from a Markdown file
 
 ```python

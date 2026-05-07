@@ -286,6 +286,77 @@ def test_context_graph(client):
 
 
 # ---------------------------------------------------------------------------
+# Session-aware ingest middleware
+# ---------------------------------------------------------------------------
+
+def test_high_level_ingest_creates_main_session_and_raw_text(client):
+    r = client.post("/ingest", json={"text": "remember this chat turn"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["session"]["id"] == "main"
+    assert body["message"]["session_id"] == "main"
+    assert body["message"]["content"] == "remember this chat turn"
+    assert body["message"]["raw_text_id"] == body["raw_text"]["id"]
+    assert body["raw_text"]["text"] == "remember this chat turn"
+    assert any(job["name"] == "llm_extraction" for job in body["derived"])
+
+
+def test_high_level_ingest_appends_to_existing_session_history(client):
+    first = client.post("/ingest", json={"session_id": "planning", "text": "first turn"})
+    assert first.status_code == 200
+    second = client.post("/ingest", json={"session_id": "planning", "role": "assistant", "text": "second turn"})
+    assert second.status_code == 200
+
+    history = client.get("/sessions/planning/history")
+    assert history.status_code == 200
+    assert [m["content"] for m in history.json()] == ["first turn", "second turn"]
+    assert [m["role"] for m in history.json()] == ["user", "assistant"]
+
+
+def test_high_level_ingest_compacts_autocontext_when_threshold_is_exceeded(client):
+    for i in range(4):
+        r = client.post(
+            "/ingest",
+            json={
+                "session_id": "compact_me",
+                "text": f"message {i} " + ("x" * 80),
+                "max_context_tokens": 30,
+                "summary_target_tokens": 20,
+            },
+        )
+        assert r.status_code == 200
+
+    full = client.get("/sessions/compact_me/history")
+    assert full.status_code == 200
+    assert len(full.json()) == 4
+    assert any(not m["autocontext_enabled"] for m in full.json())
+
+    compact = client.get("/sessions/compact_me/history?autocontext_only=true")
+    assert compact.status_code == 200
+    assert len(compact.json()) < 4
+
+    context = client.post("/context", json={"session_id": "compact_me", "prompt": "message"})
+    assert context.status_code == 200
+    assert len(context.json()["summaries"]) >= 1
+
+
+def test_context_package_uses_dataset_memory_items(client):
+    from app.store import get_store
+    store = get_store()
+    store.insert_memory_item({
+        "id": "ctx_item_1",
+        "dataset_key": "test_ds",
+        "raw_text": "context package keyword",
+        "metadata": {"kind": "note"},
+    })
+    r = client.post("/context", json={"prompt": "keyword", "dataset_keys": ["test_ds"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["dataset_keys"] == ["test_ds"]
+    assert any(item["source_id"] == "ctx_item_1" for item in body["items"])
+
+
+# ---------------------------------------------------------------------------
 # Graph explore
 # ---------------------------------------------------------------------------
 

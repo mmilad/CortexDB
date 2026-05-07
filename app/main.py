@@ -6,8 +6,11 @@ from app import __version__
 from app.api.namespaces import router as namespace_router
 from app.api.router import api_router
 from app.embed.service import get_embedding_service
+from app.env import load_dotenv
 from app.namespaces import close_namespace_stores, get_store_for_request
 from app.store import close_store, get_store
+
+load_dotenv()
 
 
 @asynccontextmanager

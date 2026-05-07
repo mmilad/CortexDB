@@ -5,6 +5,10 @@ from __future__ import annotations
 import argparse
 import os
 
+from app.env import load_dotenv
+
+load_dotenv()
+
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 5000
 
