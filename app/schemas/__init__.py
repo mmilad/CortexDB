@@ -12,6 +12,12 @@ from app.schemas.discovery import (
     DatasetDiscoverRequest,
     DatasetDiscoverResponse,
 )
+from app.schemas.derived import (
+    DERIVED_MEMORY_SCHEMA_VERSION,
+    DerivedDatasetHint,
+    DerivedMemoryEnvelope,
+    DerivedMemoryRecord,
+)
 from app.schemas.memory import (
     IngestItem,
     IngestRequest,
@@ -49,6 +55,10 @@ __all__ = [
     "DatasetDiscoverRequest",
     "DatasetDiscoverResponse",
     "DatasetRecord",
+    "DERIVED_MEMORY_SCHEMA_VERSION",
+    "DerivedDatasetHint",
+    "DerivedMemoryEnvelope",
+    "DerivedMemoryRecord",
     "EdgeType",
     "FieldDescription",
     "GraphEdge",

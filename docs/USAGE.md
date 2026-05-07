@@ -266,6 +266,32 @@ cortexdb-api --reload
 Without an LLM provider, `/ingest` still writes `sessions`,
 `session_messages`, and `raw_texts`; the derived jobs return `skipped`.
 
+Derived extraction uses structured JSON output. CortexDB sends a JSON Schema in
+`response_format` and validates the model response before writing memory items.
+The generic envelope is:
+
+```json
+{
+  "schema_version": "cortexdb.derived_memory.v1",
+  "memories": [
+    {
+      "dataset_key": "derived_preferences",
+      "kind": "preference",
+      "text": "User prefers local Ollama models for development.",
+      "score": 0.9,
+      "metadata": {"scope": "dev"},
+      "dataset": {
+        "display_name": "Derived Preferences",
+        "semantic_description": "User and workflow preferences extracted from ingest.",
+        "usage_guidance": "Use when adapting assistant behavior to user preferences.",
+        "entity_types": ["Preference"],
+        "capability_tags": ["derived", "preferences"]
+      }
+    }
+  ]
+}
+```
+
 Fetch chat history and prompt-ready context:
 
 ```bash
