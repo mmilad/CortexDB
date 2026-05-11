@@ -44,6 +44,8 @@ def test_upsert_and_get_dataset(store):
     d = store.get_dataset("ds1")
     assert d is not None
     assert d["dataset_key"] == "ds1"
+    assert d["created_at"] is not None
+    assert d["updated_at"] is not None
 
 
 def test_list_datasets_empty(store):
@@ -129,6 +131,8 @@ def test_upsert_and_get_tool(store):
     t = store.get_tool("t1")
     assert t is not None
     assert t["tool_key"] == "t1"
+    assert t["created_at"] is not None
+    assert t["updated_at"] is not None
 
 
 def test_delete_tool(store):
@@ -195,6 +199,8 @@ def test_insert_and_get_memory_item(store):
     assert item["raw_text"] == "hello world"
     assert item["metadata"]["tag"] == "test"
     assert item["is_deleted"] is False
+    assert item["created_at"] is not None
+    assert item["updated_at"] is not None
 
 
 def test_soft_delete(store):
@@ -366,6 +372,56 @@ def test_metadata_filter(store):
     )
     assert len(results) == 1
     assert results[0]["id"] == "mf1"
+
+
+def test_metadata_filter_operators(store):
+    store.upsert_dataset("mfo", {})
+    store.insert_memory_item({
+        "id": "mfo1", "dataset_key": "mfo", "raw_text": "alpha",
+        "metadata": {"priority": 3, "status": "open", "day": "2026-05-07"},
+        "embedding": [1.0, 0.0], "embedding_model": "m",
+    })
+    store.insert_memory_item({
+        "id": "mfo2", "dataset_key": "mfo", "raw_text": "beta",
+        "metadata": {"priority": 1, "status": "closed", "day": "2026-05-02"},
+        "embedding": [1.0, 0.0], "embedding_model": "m",
+    })
+
+    assert [r["id"] for r in store.search_memory_items(
+        "mfo", query_vector=[1.0, 0.0], metadata_filters={"priority": {"$gte": 2}}
+    )] == ["mfo1"]
+    assert [r["id"] for r in store.search_memory_items(
+        "mfo", query_vector=[1.0, 0.0], metadata_filters={"priority": {"$lte": 1}}
+    )] == ["mfo2"]
+    assert [r["id"] for r in store.search_memory_items(
+        "mfo", query_vector=[1.0, 0.0], metadata_filters={"day": {"$between": ["2026-05-01", "2026-05-03"]}}
+    )] == ["mfo2"]
+    assert [r["id"] for r in store.search_memory_items(
+        "mfo", query_vector=[1.0, 0.0], metadata_filters={"status": {"$in": ["open"]}}
+    )] == ["mfo1"]
+    assert store.search_memory_items(
+        "mfo", query_vector=[1.0, 0.0], metadata_filters={"priority": {"$between": ["bad"]}}
+    ) == []
+
+
+def test_metadata_filter_created_at_operator(store):
+    store.upsert_dataset("mft", {})
+    store.insert_memory_item({
+        "id": "mft1", "dataset_key": "mft", "raw_text": "alpha",
+        "metadata": {}, "embedding": [1.0, 0.0], "embedding_model": "m",
+    })
+    store._conn.execute(
+        "UPDATE memory_items SET created_at = ?, updated_at = ? WHERE id = ?",
+        ("2026-05-07 10:00:00", "2026-05-07 10:00:00", "mft1"),
+    )
+    store._conn.commit()
+
+    results = store.search_memory_items(
+        "mft",
+        query_vector=[1.0, 0.0],
+        metadata_filters={"created_at": {"$between": ["2026-05-07T00:00:00", "2026-05-08T00:00:00"]}},
+    )
+    assert [r["id"] for r in results] == ["mft1"]
 
 
 # ---------------------------------------------------------------------------

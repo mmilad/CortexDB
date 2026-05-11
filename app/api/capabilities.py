@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 
 from app.embed.service import EmbeddingService, get_embedding_service
 from app.llm import LLMService, get_llm_service
+from app.processors import ProcessorService, get_processor_service
 from app.store import SqliteStore, get_store
 
 router = APIRouter(tags=["capabilities"])
@@ -14,6 +15,7 @@ def capabilities(
     store: Annotated[SqliteStore, Depends(get_store)],
     embed_svc: Annotated[EmbeddingService, Depends(get_embedding_service)],
     llm_svc: Annotated[LLMService, Depends(get_llm_service)],
+    processor_svc: Annotated[ProcessorService, Depends(get_processor_service)],
 ) -> dict[str, Any]:
     datasets = store.list_datasets()
     tools = store.list_tools()
@@ -31,6 +33,11 @@ def capabilities(
         "embedding": {
             "enabled": embed_svc.is_enabled(),
             "model_id": embed_svc.model_id if embed_svc.is_enabled() else None,
+        },
+        "processor": {
+            "enabled": processor_svc.is_enabled(),
+            "provider": processor_svc.provider,
+            "url": processor_svc.url if processor_svc.is_enabled() else None,
         },
         "resources": {
             "datasets": list(datasets.keys()),

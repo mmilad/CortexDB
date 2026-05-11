@@ -43,6 +43,8 @@ class ToolRecord(BaseModel):
     )
     embedding_model_version: str | None = None
     status: str = "active"
+    created_at: str | None = None
+    updated_at: str | None = None
     input_schema_ref: str | None = Field(
         default=None, description="JSON Schema pointer for tool inputs."
     )

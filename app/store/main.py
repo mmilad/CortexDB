@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -59,12 +60,26 @@ CREATE TABLE IF NOT EXISTS datasets (
     embed_raw          TEXT,
     embedding          TEXT,
     embedding_model    TEXT,
-    embedded_at        TEXT
+    embedded_at        TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS tools (
     tool_key    TEXT PRIMARY KEY,
-    data        TEXT NOT NULL
+    data        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS ingest_rule_packs (
+    key        TEXT NOT NULL,
+    namespace  TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'active',
+    data       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (namespace, key)
 );
 
 CREATE TABLE IF NOT EXISTS relationships (
@@ -138,6 +153,7 @@ CREATE TABLE IF NOT EXISTS memory_items (
     embedding_model TEXT,
     is_deleted      INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (dataset_key) REFERENCES datasets(dataset_key)
 );
 
@@ -147,6 +163,7 @@ CREATE INDEX IF NOT EXISTS idx_items_dataset ON memory_items (dataset_key);
 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_raw_texts_created ON raw_texts (created_at);
 CREATE INDEX IF NOT EXISTS idx_session_summaries_session ON session_summaries (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ingest_rule_packs_status ON ingest_rule_packs (namespace, status);
 """
 
 # Additive migrations — run idempotently on every startup.
@@ -157,6 +174,11 @@ _MIGRATIONS = [
     "ALTER TABLE datasets ADD COLUMN embedded_at     TEXT",
     "ALTER TABLE memory_items ADD COLUMN is_deleted  INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE datasets ADD COLUMN vec_dim INTEGER",
+    "ALTER TABLE datasets ADD COLUMN created_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'",
+    "ALTER TABLE datasets ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'",
+    "ALTER TABLE tools ADD COLUMN created_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'",
+    "ALTER TABLE tools ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'",
+    "ALTER TABLE memory_items ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'",
 ]
 
 
@@ -225,7 +247,7 @@ class SqliteStore:
     def upsert_dataset(self, key: str, data: dict[str, Any]) -> None:
         self._conn.execute(
             "INSERT INTO datasets (dataset_key, data) VALUES (?, ?)"
-            " ON CONFLICT(dataset_key) DO UPDATE SET data = excluded.data",
+            " ON CONFLICT(dataset_key) DO UPDATE SET data = excluded.data, updated_at = datetime('now')",
             (key, json.dumps(data)),
         )
         self._conn.commit()
@@ -240,7 +262,7 @@ class SqliteStore:
         self._conn.execute(
             """UPDATE datasets
                SET embed_raw = ?, embedding = ?, embedding_model = ?,
-                   embedded_at = datetime('now')
+                   embedded_at = datetime('now'), updated_at = datetime('now')
                WHERE dataset_key = ?""",
             (raw_text, json.dumps(embedding), model_id, key),
         )
@@ -248,9 +270,14 @@ class SqliteStore:
 
     def get_dataset(self, key: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT data FROM datasets WHERE dataset_key = ?", (key,)
+            "SELECT data, created_at, updated_at FROM datasets WHERE dataset_key = ?", (key,)
         ).fetchone()
-        return json.loads(row["data"]) if row else None
+        if not row:
+            return None
+        data = json.loads(row["data"])
+        data.setdefault("created_at", row["created_at"])
+        data.setdefault("updated_at", row["updated_at"])
+        return data
 
     def get_dataset_embedding(self, key: str) -> tuple[list[float] | None, str | None]:
         """Return (vector, model_id) or (None, None) if not yet embedded."""
@@ -262,20 +289,29 @@ class SqliteStore:
         return json.loads(row["embedding"]), row["embedding_model"]
 
     def list_datasets(self) -> dict[str, dict[str, Any]]:
-        rows = self._conn.execute("SELECT dataset_key, data FROM datasets").fetchall()
-        return {r["dataset_key"]: json.loads(r["data"]) for r in rows}
+        rows = self._conn.execute("SELECT dataset_key, data, created_at, updated_at FROM datasets").fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            data = json.loads(row["data"])
+            data.setdefault("created_at", row["created_at"])
+            data.setdefault("updated_at", row["updated_at"])
+            result[row["dataset_key"]] = data
+        return result
 
     def list_datasets_with_embeddings(self) -> list[dict[str, Any]]:
         """Return all datasets that have a stored embedding."""
         rows = self._conn.execute(
-            "SELECT dataset_key, data, embedding, embedding_model "
+            "SELECT dataset_key, data, embedding, embedding_model, created_at, updated_at "
             "FROM datasets WHERE embedding IS NOT NULL"
         ).fetchall()
         result = []
         for r in rows:
+            data = json.loads(r["data"])
+            data.setdefault("created_at", r["created_at"])
+            data.setdefault("updated_at", r["updated_at"])
             result.append({
                 "dataset_key": r["dataset_key"],
-                "data": json.loads(r["data"]),
+                "data": data,
                 "embedding": json.loads(r["embedding"]),
                 "embedding_model": r["embedding_model"],
             })
@@ -328,20 +364,31 @@ class SqliteStore:
     def upsert_tool(self, key: str, data: dict[str, Any]) -> None:
         self._conn.execute(
             "INSERT INTO tools (tool_key, data) VALUES (?, ?)"
-            " ON CONFLICT(tool_key) DO UPDATE SET data = excluded.data",
+            " ON CONFLICT(tool_key) DO UPDATE SET data = excluded.data, updated_at = datetime('now')",
             (key, json.dumps(data)),
         )
         self._conn.commit()
 
     def get_tool(self, key: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT data FROM tools WHERE tool_key = ?", (key,)
+            "SELECT data, created_at, updated_at FROM tools WHERE tool_key = ?", (key,)
         ).fetchone()
-        return json.loads(row["data"]) if row else None
+        if not row:
+            return None
+        data = json.loads(row["data"])
+        data.setdefault("created_at", row["created_at"])
+        data.setdefault("updated_at", row["updated_at"])
+        return data
 
     def list_tools(self) -> dict[str, dict[str, Any]]:
-        rows = self._conn.execute("SELECT tool_key, data FROM tools").fetchall()
-        return {r["tool_key"]: json.loads(r["data"]) for r in rows}
+        rows = self._conn.execute("SELECT tool_key, data, created_at, updated_at FROM tools").fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            data = json.loads(row["data"])
+            data.setdefault("created_at", row["created_at"])
+            data.setdefault("updated_at", row["updated_at"])
+            result[row["tool_key"]] = data
+        return result
 
     def delete_tool(self, key: str) -> bool:
         exists = self._conn.execute(
@@ -355,6 +402,75 @@ class SqliteStore:
         self._conn.execute("DELETE FROM tools WHERE tool_key = ?", (key,))
         self._conn.commit()
         return True
+
+    # ------------------------------------------------------------------
+    # Ingest rule packs
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _namespace_key(namespace: str | None) -> str:
+        return namespace or ""
+
+    def upsert_ingest_rule_pack(self, key: str, data: dict[str, Any], namespace: str | None = None) -> None:
+        ns = self._namespace_key(namespace)
+        status = data.get("status", "active")
+        self._conn.execute(
+            """INSERT INTO ingest_rule_packs (key, namespace, status, data)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(namespace, key) DO UPDATE SET
+                 status = excluded.status,
+                 data = excluded.data,
+                 updated_at = datetime('now')""",
+            (key, ns, status, json.dumps(data)),
+        )
+        self._conn.commit()
+
+    def get_ingest_rule_pack(self, key: str, namespace: str | None = None) -> dict[str, Any] | None:
+        ns = self._namespace_key(namespace)
+        row = self._conn.execute(
+            "SELECT key, namespace, data, created_at, updated_at FROM ingest_rule_packs "
+            "WHERE namespace = ? AND key = ?",
+            (ns, key),
+        ).fetchone()
+        return self._row_to_ingest_rule_pack(row) if row else None
+
+    def list_ingest_rule_packs(
+        self,
+        namespace: str | None = None,
+        active_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        ns = self._namespace_key(namespace)
+        if active_only:
+            rows = self._conn.execute(
+                "SELECT key, namespace, data, created_at, updated_at FROM ingest_rule_packs "
+                "WHERE namespace = ? AND status = 'active' ORDER BY key",
+                (ns,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT key, namespace, data, created_at, updated_at FROM ingest_rule_packs "
+                "WHERE namespace = ? ORDER BY key",
+                (ns,),
+            ).fetchall()
+        return [self._row_to_ingest_rule_pack(row) for row in rows]
+
+    def delete_ingest_rule_pack(self, key: str, namespace: str | None = None) -> bool:
+        ns = self._namespace_key(namespace)
+        cur = self._conn.execute(
+            "DELETE FROM ingest_rule_packs WHERE namespace = ? AND key = ?",
+            (ns, key),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    @staticmethod
+    def _row_to_ingest_rule_pack(row: sqlite3.Row) -> dict[str, Any]:
+        data = json.loads(row["data"])
+        data.setdefault("key", row["key"])
+        data["namespace"] = data.get("namespace") or row["namespace"] or None
+        data["created_at"] = data.get("created_at") or row["created_at"]
+        data["updated_at"] = data.get("updated_at") or row["updated_at"]
+        return data
 
     # ------------------------------------------------------------------
     # Relationships
@@ -704,7 +820,8 @@ class SqliteStore:
                  metadata        = excluded.metadata,
                  embedding       = excluded.embedding,
                  embedding_model = excluded.embedding_model,
-                 is_deleted      = 0""",
+                 is_deleted      = 0,
+                 updated_at      = datetime('now')""",
             {
                 "id": item["id"],
                 "dataset_key": item["dataset_key"],
@@ -753,7 +870,7 @@ class SqliteStore:
 
     def soft_delete_memory_item(self, item_id: str) -> bool:
         cur = self._conn.execute(
-            "UPDATE memory_items SET is_deleted = 1 WHERE id = ? AND is_deleted = 0",
+            "UPDATE memory_items SET is_deleted = 1, updated_at = datetime('now') WHERE id = ? AND is_deleted = 0",
             (item_id,),
         )
         self._conn.commit()
@@ -854,8 +971,78 @@ class SqliteStore:
             return items
         return [
             it for it in items
-            if all(it.get("metadata", {}).get(k) == v for k, v in metadata_filters.items())
+            if all(self._matches_filter(it, k, v) for k, v in metadata_filters.items())
         ]
+
+    @staticmethod
+    def _filter_value(item: dict[str, Any], key: str) -> Any:
+        if key in ("created_at", "updated_at"):
+            return item.get(key)
+        return item.get("metadata", {}).get(key)
+
+    @staticmethod
+    def _compare_value(value: Any) -> Any:
+        if isinstance(value, (int, float)):
+            return value
+        if not isinstance(value, str):
+            return value
+        raw = value.strip()
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return raw
+
+    @classmethod
+    def _ordered_compare(cls, left: Any, right: Any, op: str) -> bool:
+        if left is None or right is None:
+            return False
+        left_value = cls._compare_value(left)
+        right_value = cls._compare_value(right)
+        if isinstance(left_value, datetime) and isinstance(right_value, datetime):
+            if (left_value.tzinfo is None) != (right_value.tzinfo is None):
+                left_value = left_value.replace(tzinfo=None)
+                right_value = right_value.replace(tzinfo=None)
+        try:
+            if op == "$gte":
+                return left_value >= right_value
+            if op == "$lte":
+                return left_value <= right_value
+        except TypeError:
+            return False
+        return False
+
+    @classmethod
+    def _matches_filter(cls, item: dict[str, Any], key: str, criterion: Any) -> bool:
+        value = cls._filter_value(item, key)
+        if isinstance(criterion, dict):
+            if not criterion:
+                return False
+            for op, expected in criterion.items():
+                if op == "$gte":
+                    if not cls._ordered_compare(value, expected, op):
+                        return False
+                elif op == "$lte":
+                    if not cls._ordered_compare(value, expected, op):
+                        return False
+                elif op == "$between":
+                    if (
+                        not isinstance(expected, list)
+                        or len(expected) != 2
+                        or not cls._ordered_compare(value, expected[0], "$gte")
+                        or not cls._ordered_compare(value, expected[1], "$lte")
+                    ):
+                        return False
+                elif op == "$in":
+                    if not isinstance(expected, list) or value not in expected:
+                        return False
+                else:
+                    return False
+            return True
+        return value == criterion
 
     def _search_vector_only(
         self,
@@ -1019,7 +1206,7 @@ class SqliteStore:
         model_id: str,
     ) -> None:
         self._conn.execute(
-            "UPDATE memory_items SET embedding = ?, embedding_model = ? WHERE id = ?",
+            "UPDATE memory_items SET embedding = ?, embedding_model = ?, updated_at = datetime('now') WHERE id = ?",
             (json.dumps(embedding), model_id, item_id),
         )
         self._conn.commit()

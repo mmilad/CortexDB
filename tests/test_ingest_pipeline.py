@@ -5,6 +5,8 @@ import os
 import pytest
 
 from app.ingest import build_ingest_items, chunk_text, ingest_source_to_dataset
+from app.processors.safe import process_text_safe
+from app.schemas.processor import ProcessorRequest, ProcessorResponse
 from app.store import SqliteStore
 
 os.environ["CORTEXDB_EMBED_PROVIDER"] = "none"
@@ -22,6 +24,14 @@ class FakeEmbeddingService:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         self.batch_sizes.append(len(texts))
         return [[float(len(text)), 1.0] for text in texts]
+
+
+class FakeProcessorService:
+    def is_enabled(self) -> bool:
+        return True
+
+    async def process_text(self, request: ProcessorRequest) -> ProcessorResponse:
+        return process_text_safe(request)
 
 
 @pytest.fixture()
@@ -133,3 +143,31 @@ async def test_ingest_source_to_dataset_batches_and_stores_items(store: SqliteSt
     assert store.count_memory_items("docs") == result.ingested
     stored = store.list_memory_items("docs", limit=10)
     assert stored[0]["embedding_model"] == "fake/test-embedding"
+
+
+@pytest.mark.asyncio
+async def test_ingest_text_with_safe_processor_stores_offsets_and_primitives(store: SqliteStore) -> None:
+    store.upsert_dataset("docs", {"dataset_key": "docs", "display_name": "Docs"})
+    embed_svc = FakeEmbeddingService()
+
+    result = await ingest_source_to_dataset(
+        "docs",
+        "TODO: add processor tests. This must preserve offsets.",
+        store,
+        embed_svc,  # type: ignore[arg-type]
+        max_chars=100,
+        overlap_chars=0,
+        processor_svc=FakeProcessorService(),  # type: ignore[arg-type]
+        processor_strategy="safe",
+        extract_primitives=True,
+    )
+
+    assert result.processor is not None
+    assert result.processor.status == "completed"
+    assert result.processor.primitive_count >= 1
+    stored = store.list_memory_items("docs", limit=10)
+    chunk = next(item for item in stored if item["id"].startswith("ingest-"))
+    primitive = next(item for item in stored if item["id"].startswith("primitive-"))
+    assert chunk["metadata"]["char_start"] == 0
+    assert chunk["metadata"]["processor"]
+    assert primitive["metadata"]["source"] == "processor_extraction"

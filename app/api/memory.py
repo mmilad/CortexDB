@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.embed.service import EmbeddingService, get_embedding_service
 from app.ingest.service import ingest_source_to_dataset
+from app.processors.service import ProcessorService, get_processor_service
 from app.schemas.ingest import IngestTextRequest
 from app.schemas.memory import (
     IngestRequest,
@@ -44,6 +45,7 @@ def _row_to_memory_item(row: dict) -> MemoryItem:
         metadata=row["metadata"],
         embedding_model=row.get("embedding_model"),
         created_at=row.get("created_at"),
+        updated_at=row.get("updated_at"),
         is_deleted=row.get("is_deleted", False),
     )
 
@@ -105,6 +107,7 @@ async def ingest_text_source(
     body: IngestTextRequest,
     store: Annotated[SqliteStore, Depends(get_store)],
     embed_svc: Annotated[EmbeddingService, Depends(get_embedding_service)],
+    processor_svc: Annotated[ProcessorService, Depends(get_processor_service)],
 ) -> IngestResult:
     try:
         return await ingest_source_to_dataset(
@@ -117,6 +120,9 @@ async def ingest_text_source(
             metadata=body.metadata,
             ingestion_id=body.ingestion_id,
             batch_size=body.batch_size,
+            processor_svc=processor_svc,
+            processor_strategy=body.processor_strategy,
+            extract_primitives=body.extract_primitives,
         )
     except (DatasetNotFoundError, EmbeddingDisabledError) as exc:
         _raise_ingest_http_error(exc)

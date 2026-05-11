@@ -115,6 +115,8 @@ class DatasetRecord(BaseModel):
             "Monitor this to catch metadata drift."
         ),
     )
+    created_at: str | None = None
+    updated_at: str | None = None
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Caller-defined extension; not interpreted by CortexDB.",

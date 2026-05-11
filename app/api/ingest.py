@@ -6,9 +6,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.llm import LLMService, get_llm_service
 from app.schemas.session import DerivedJobResult, IngestRequest, IngestResult
-from app.services.derived import run_derived_workflow
+from app.services.logic_ingest import run_logic_ingest_workflow
 from app.services.session import (
     ensure_session,
     maybe_compact_session,
@@ -33,7 +32,6 @@ router = APIRouter(tags=["ingest"])
 def ingest(
     body: IngestRequest,
     store: Annotated[SqliteStore, Depends(get_store)],
-    llm_svc: Annotated[LLMService, Depends(get_llm_service)],
 ) -> IngestResult:
     session = ensure_session(
         store,
@@ -72,15 +70,14 @@ def ingest(
         summary_target_tokens=body.summary_target_tokens,
     )
 
-    derived = run_derived_workflow(
+    derived = run_logic_ingest_workflow(
         store=store,
         text=body.text,
-        dataset_policy=body.dataset_policy,
-        dataset_keys=body.dataset_keys,
         derive=body.derive,
-        llm_svc=llm_svc,
         session_id=session.id,
         raw_text_id=raw.id,
+        session_message_id=message.id,
+        namespace=body.namespace,
     )
     if summary is not None:
         derived.insert(

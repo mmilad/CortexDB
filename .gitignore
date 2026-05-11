@@ -36,3 +36,4 @@ cortexdb.sqlite
 .cortexdb/
 
 .test_tmp
+.test_run_tmp

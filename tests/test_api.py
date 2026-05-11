@@ -298,7 +298,87 @@ def test_high_level_ingest_creates_main_session_and_raw_text(client):
     assert body["message"]["content"] == "remember this chat turn"
     assert body["message"]["raw_text_id"] == body["raw_text"]["id"]
     assert body["raw_text"]["text"] == "remember this chat turn"
-    assert any(job["name"] == "llm_extraction" for job in body["derived"])
+    job_names = {job["name"] for job in body["derived"]}
+    assert {"logic_analysis", "session_memory", "primitive_memory", "graph_edges"} <= job_names
+
+
+def test_high_level_ingest_writes_logic_analysis_outputs(client):
+    from app.store import get_store
+
+    pack = {
+        "key": "api_framework_logic",
+        "display_name": "API Framework Logic",
+        "primitive_rules": [
+            {
+                "kind": "framework",
+                "pattern": r"\bMastra\b",
+                "target_dataset_key": "api_framework_routes",
+                "confidence": 0.82,
+            }
+        ],
+    }
+    target_dataset = {
+        **DATASET_PAYLOAD,
+        "dataset_key": "api_framework_routes",
+        "display_name": "API Framework Routes",
+        "semantic_description": "Framework route target used to prove /ingest does not write route candidates.",
+    }
+    assert client.post("/datasets", json=target_dataset).status_code == 200
+    assert client.post("/ingest/rule-packs", json=pack).status_code == 200
+
+    r = client.post(
+        "/ingest",
+        json={"session_id": "logic_api", "text": "TODO: compare Mastra for route handling."},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    store = get_store()
+
+    session_items = store.list_memory_items("session_memory")
+    assert any(item["metadata"]["session_id"] == "logic_api" for item in session_items)
+    assert any(item["metadata"]["raw_text_id"] == body["raw_text"]["id"] for item in session_items)
+    assert any(item["metadata"]["session_message_id"] == body["message"]["id"] for item in session_items)
+    assert any(item["metadata"]["logic_ingest"] is True for item in session_items)
+
+    primitive_items = store.list_memory_items("ingest_primitives")
+    framework_items = [
+        item for item in primitive_items
+        if item["metadata"].get("primitive_kind") == "framework" and item["raw_text"] == "Mastra"
+    ]
+    assert framework_items
+    assert framework_items[0]["metadata"]["raw_text_id"] == body["raw_text"]["id"]
+    assert framework_items[0]["metadata"]["session_message_id"] == body["message"]["id"]
+    assert framework_items[0]["metadata"]["logic_ingest"] is True
+
+    rels = store.list_relationships()
+    assert any(rel["source_key"] == body["raw_text"]["id"] for rel in rels)
+    assert any(rel["target_key"] == body["message"]["id"] for rel in rels)
+    assert not any(rel["source_key"].startswith("raw-") and len(rel["source_key"]) == 20 for rel in rels)
+    assert not any(rel["target_key"].startswith("msg-") and len(rel["target_key"]) == 20 for rel in rels)
+
+    assert store.count_memory_items("api_framework_routes") == 0
+    derived_by_name = {job["name"]: job for job in body["derived"]}
+    assert derived_by_name["primitive_memory"]["item_ids"]
+    assert "api_framework_routes" in derived_by_name["logic_analysis"]["dataset_keys"]
+
+
+def test_high_level_ingest_derive_false_skips_logic_persistence(client):
+    from app.store import get_store
+
+    r = client.post(
+        "/ingest",
+        json={"session_id": "skip_logic", "text": "TODO: do not persist analyzer outputs.", "derive": False},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["derived"] == [
+        {"name": "logic_analysis", "status": "skipped", "detail": "derive=false", "dataset_keys": [], "item_ids": []}
+    ]
+    store = get_store()
+    assert not any(
+        item["metadata"].get("session_id") == "skip_logic"
+        for item in store.list_memory_items("session_memory")
+    )
 
 
 def test_high_level_ingest_appends_to_existing_session_history(client):

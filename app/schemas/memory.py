@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.processor import ProcessorJobResult
+
 
 class IngestItem(BaseModel):
     """One text item to ingest into a dataset.
@@ -42,6 +44,7 @@ class IngestResult(BaseModel):
     ingested: int
     ids: list[str]
     embedding_model: str | None = None
+    processor: ProcessorJobResult | None = None
 
 
 class MemoryItem(BaseModel):
@@ -53,6 +56,7 @@ class MemoryItem(BaseModel):
     metadata: dict[str, Any]
     embedding_model: str | None
     created_at: str | None
+    updated_at: str | None = None
     is_deleted: bool = False
 
 
