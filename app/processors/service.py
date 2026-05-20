@@ -25,6 +25,26 @@ class ProcessorService:
     def url(self) -> str:
         return self._config.url
 
+    @property
+    def strategy(self) -> str:
+        return self._config.strategy
+
+    @property
+    def classify_enabled(self) -> bool:
+        return self._config.classify
+
+    @property
+    def known_match_threshold(self) -> float:
+        return self._config.known_match_threshold
+
+    @property
+    def candidate_threshold(self) -> float:
+        return self._config.candidate_threshold
+
+    @property
+    def graceful_fallback(self) -> bool:
+        return self._config.graceful_fallback
+
     def is_enabled(self) -> bool:
         return self._config.provider != "none"
 

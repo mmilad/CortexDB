@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.schemas.dataset import DatasetRecord
+
 
 RulePackStatus = Literal["draft", "active", "disabled"]
 
@@ -68,6 +70,23 @@ class IngestRuleExample(BaseModel):
     notes: str = ""
 
 
+class IngestSemanticRuleSpec(BaseModel):
+    kind: str = Field(..., min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
+    target_dataset_key: str | None = None
+    examples: list[str] = Field(default_factory=list)
+    threshold: float = Field(default=0.72, ge=0.0, le=1.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class IngestEntityHintSpec(BaseModel):
+    kind: str = Field(..., min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
+    spacy_labels: list[str] = Field(default_factory=list)
+    noun_phrases: bool = False
+    target_dataset_key: str | None = None
+    confidence: float = Field(default=0.65, ge=0.0, le=1.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class IngestRulePackRecord(BaseModel):
     key: str = Field(..., min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     display_name: str
@@ -78,9 +97,12 @@ class IngestRulePackRecord(BaseModel):
     aliases: list[IngestAliasRuleSpec] = Field(default_factory=list)
     relationship_patterns: list[IngestRelationshipPatternSpec] = Field(default_factory=list)
     routing_hints: list[IngestRoutingHintSpec] = Field(default_factory=list)
+    semantic_rules: list[IngestSemanticRuleSpec] = Field(default_factory=list)
+    entity_hints: list[IngestEntityHintSpec] = Field(default_factory=list)
     metadata_fields: list[IngestMetadataFieldSpec] = Field(default_factory=list)
     examples: list[IngestRuleExample] = Field(default_factory=list)
     validation_notes: list[str] = Field(default_factory=list)
+    datasets: list[DatasetRecord] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
     updated_at: str | None = None
@@ -92,8 +114,8 @@ class IngestRulePackValidationResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     compiled_custom_primitive_count: int = 0
     usage_hint: str = (
-        "If accepted is true, POST the same rule pack to /ingest/rule-packs "
-        "to persist it. Active packs are used by POST /ingest/analyze."
+        "If accepted is true, POST the same ingest rule config to /ingest/rules "
+        "to persist it. Active rules are used by POST /ingest."
     )
 
 

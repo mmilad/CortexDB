@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from app.processors import ProcessorService, get_processor_service
 from app.schemas.session import DerivedJobResult, IngestRequest, IngestResult
 from app.services.logic_ingest import run_logic_ingest_workflow
 from app.services.session import (
@@ -29,9 +30,10 @@ router = APIRouter(tags=["ingest"])
         "not block the durable writes."
     ),
 )
-def ingest(
+async def ingest(
     body: IngestRequest,
     store: Annotated[SqliteStore, Depends(get_store)],
+    processor_svc: Annotated[ProcessorService, Depends(get_processor_service)],
 ) -> IngestResult:
     session = ensure_session(
         store,
@@ -70,7 +72,7 @@ def ingest(
         summary_target_tokens=body.summary_target_tokens,
     )
 
-    derived = run_logic_ingest_workflow(
+    derived, trace = await run_logic_ingest_workflow(
         store=store,
         text=body.text,
         derive=body.derive,
@@ -78,6 +80,7 @@ def ingest(
         raw_text_id=raw.id,
         session_message_id=message.id,
         namespace=body.namespace,
+        processor_svc=processor_svc,
     )
     if summary is not None:
         derived.insert(
@@ -89,4 +92,10 @@ def ingest(
             ),
         )
 
-    return IngestResult(session=session, message=message, raw_text=raw, derived=derived)
+    return IngestResult(
+        session=session,
+        message=message,
+        raw_text=raw,
+        derived=derived,
+        trace=trace,
+    )

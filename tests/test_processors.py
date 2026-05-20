@@ -6,8 +6,9 @@ from fastapi.testclient import TestClient
 from app.ingest.service import build_ingest_items_with_processor
 from app.processors.api import app as processor_app
 from app.processors.safe import process_text_safe
+from app.processors.config import ProcessorConfig
 from app.processors.validation import ProcessorValidationError, validate_processor_response
-from app.schemas.processor import ProcessorRequest, ProcessorResponse, ProcessorSpan
+from app.schemas.processor import ProcessorEntity, ProcessorRequest, ProcessorResponse, ProcessorSpan
 
 
 class DisabledProcessor:
@@ -93,6 +94,59 @@ def test_processor_validation_rejects_empty_chunks() -> None:
 
     with pytest.raises(ProcessorValidationError, match="no chunks"):
         validate_processor_response(source, response, max_chars=100)
+
+
+def test_processor_validation_rejects_invalid_entity_offsets() -> None:
+    source = "Mastra is useful."
+    response = ProcessorResponse(
+        processor="test",
+        processor_version="test/1",
+        strategy="semantic",
+        chunks=[ProcessorSpan(text=source, char_start=0, char_end=len(source))],
+        entities=[
+            ProcessorEntity(
+                text="Mastra!",
+                label="PRODUCT",
+                char_start=0,
+                char_end=6,
+            )
+        ],
+    )
+
+    with pytest.raises(ProcessorValidationError, match="span text does not match"):
+        validate_processor_response(source, response, max_chars=100)
+
+
+def test_processor_config_prefers_client_env_names(monkeypatch) -> None:
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_PROVIDER", "local")
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_URL", "http://legacy:5010")
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_STRATEGY", "safe")
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_CLIENT_PROVIDER", "sidecar")
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_CLIENT_URL", "http://client:5010")
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_CLIENT_STRATEGY", "semantic")
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_CLIENT_CLASSIFY", "true")
+
+    config = ProcessorConfig.from_env()
+
+    assert config.provider == "sidecar"
+    assert config.url == "http://client:5010"
+    assert config.strategy == "semantic"
+    assert config.classify is True
+
+
+def test_processor_config_supports_legacy_env_names(monkeypatch) -> None:
+    monkeypatch.delenv("CORTEXDB_PROCESSOR_CLIENT_PROVIDER", raising=False)
+    monkeypatch.delenv("CORTEXDB_PROCESSOR_CLIENT_URL", raising=False)
+    monkeypatch.delenv("CORTEXDB_PROCESSOR_CLIENT_STRATEGY", raising=False)
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_PROVIDER", "sidecar")
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_URL", "http://legacy:5010")
+    monkeypatch.setenv("CORTEXDB_PROCESSOR_STRATEGY", "safe")
+
+    config = ProcessorConfig.from_env()
+
+    assert config.provider == "sidecar"
+    assert config.url == "http://legacy:5010"
+    assert config.strategy == "safe"
 
 
 @pytest.mark.asyncio

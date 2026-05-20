@@ -83,11 +83,42 @@ class DerivedJobResult(BaseModel):
     item_ids: list[str] = Field(default_factory=list)
 
 
+class IngestRouteTargetTrace(BaseModel):
+    dataset_key: str
+    score: float | None = None
+    reasons: list[str] = Field(default_factory=list)
+    primitive_count: int = 0
+    chunk_count: int = 0
+
+
+class IngestCanonicalEntityTrace(BaseModel):
+    id: str
+    dataset_key: str
+    entity_kind: str
+    name: str
+    observation_id: str
+    mention_count: int = 1
+
+
+class IngestTrace(BaseModel):
+    status: DerivedStatus = "completed"
+    chunks_written: int = 0
+    observations_written: int = 0
+    canonical_entities_upserted: int = 0
+    candidate_observations_written: int = 0
+    graph_edges_written: int = 0
+    route_targets: list[IngestRouteTargetTrace] = Field(default_factory=list)
+    observation_kinds: dict[str, int] = Field(default_factory=dict)
+    canonical_entities: list[IngestCanonicalEntityTrace] = Field(default_factory=list)
+    candidate_labels: list[str] = Field(default_factory=list)
+
+
 class IngestResult(BaseModel):
     session: SessionRecord
     message: SessionMessageRecord
     raw_text: RawTextRecord
     derived: list[DerivedJobResult]
+    trace: IngestTrace | None = None
 
 
 class ContextRequest(BaseModel):

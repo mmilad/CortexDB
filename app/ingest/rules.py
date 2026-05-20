@@ -139,6 +139,18 @@ def validate_rule_pack(
         if known_dataset_keys and hint.target_dataset_key not in known_dataset_keys:
             warnings.append(f"routing_hints[{index}].target_dataset_key '{hint.target_dataset_key}' is not registered")
 
+    for index, semantic in enumerate(pack.semantic_rules):
+        if not semantic.examples:
+            warnings.append(f"semantic_rules[{index}] has no examples for classifier prototypes")
+        if semantic.target_dataset_key and known_dataset_keys and semantic.target_dataset_key not in known_dataset_keys:
+            warnings.append(f"semantic_rules[{index}].target_dataset_key '{semantic.target_dataset_key}' is not registered")
+
+    for index, hint in enumerate(pack.entity_hints):
+        if not hint.spacy_labels and not hint.noun_phrases:
+            warnings.append(f"entity_hints[{index}] has no spacy_labels and noun_phrases=false")
+        if hint.target_dataset_key and known_dataset_keys and hint.target_dataset_key not in known_dataset_keys:
+            warnings.append(f"entity_hints[{index}].target_dataset_key '{hint.target_dataset_key}' is not registered")
+
     compiled_count = 0
     if not errors:
         try:
@@ -353,15 +365,16 @@ def build_rule_guidance(store: SqliteStore, *, namespace: str | None = None) -> 
         ),
         workflow=[
             "Read this guidance before proposing a new knowledge type.",
-            "Return an IngestRulePackRecord JSON object with regexes, aliases, routing hints, examples, and notes.",
-            "POST the object to /ingest/rule-packs/validate for dry-run validation.",
-            "POST the accepted object to /ingest/rule-packs to persist it.",
-            "Call POST /ingest/analyze to preview how active rule packs affect analyzer proposals.",
+            "Return an IngestRulePackRecord JSON object with semantic examples, entity hints, optional regexes, aliases, routing hints, examples, and notes.",
+            "POST the object to /ingest/rules to validate, persist, and optionally create/update included datasets.",
+            "Future POST /ingest calls apply active rules while keeping LLM reasoning outside CortexDB.",
         ],
         accepted_objects=[
             "primitive_rules: regex extractors compiled into analyzer custom primitives",
             "aliases: canonical names plus alternate surface forms compiled into regex primitives",
             "relationship_patterns: validated and stored graph templates for future promotion workflows",
+            "semantic_rules: MiniLM/prototype classifier examples passed to the processor sidecar",
+            "entity_hints: spaCy labels and noun phrase settings passed to the processor sidecar",
             "routing_hints: dataset targets plus match terms compiled into route-oriented primitives",
             "metadata_fields: expected metadata glossary for client-side structured writes",
             "examples: natural-language fixtures an LLM can use to self-check a proposal",
@@ -432,13 +445,15 @@ def build_rule_guidance(store: SqliteStore, *, namespace: str | None = None) -> 
             "Check domain_context.primitive_kinds before inventing a new primitive kind.",
             "Provide regex primitive_rules or aliases that are deterministic and bounded.",
             "Add routing_hints when text cues should point to a target dataset even without entity matches.",
+            "Add semantic_rules and entity_hints when classification should be handled by the processor sidecar.",
             "Declare metadata_fields that clients should attach to future primitive writes.",
             "Include examples with expected_primitives so the proposal can be reviewed and dry-run.",
-            "Call /ingest/rule-packs/validate before persisting the pack.",
+            "Call /ingest/rules to validate and persist the config.",
         ],
         json_contract_hint=(
             "Return one JSON object matching IngestRulePackRecord: key, display_name, optional description, "
-            "status, primitive_rules, aliases, relationship_patterns, routing_hints, metadata_fields, "
-            "examples, validation_notes, and metadata. Do not include prose outside JSON when posting."
+            "status, semantic_rules, entity_hints, optional primitive_rules, aliases, relationship_patterns, "
+            "routing_hints, metadata_fields, datasets, examples, validation_notes, and metadata. "
+            "Do not include prose outside JSON when posting."
         ),
     )

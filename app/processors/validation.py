@@ -44,4 +44,38 @@ def validate_processor_response(
         if source[primitive.char_start:primitive.char_end] != primitive.text:
             raise ProcessorValidationError("processor primitive text does not match source offsets")
 
+    for entity in response.entities:
+        span = ProcessorSpan(
+            text=entity.text,
+            char_start=entity.char_start,
+            char_end=entity.char_end,
+        )
+        _validate_span_text(source, span, max_chars=max_chars)
+
+    for phrase in response.phrases:
+        span = ProcessorSpan(
+            text=phrase.text,
+            char_start=phrase.char_start,
+            char_end=phrase.char_end,
+        )
+        _validate_span_text(source, span, max_chars=max_chars)
+
+    for candidate in response.candidates:
+        span = ProcessorSpan(
+            text=candidate.text,
+            char_start=candidate.char_start,
+            char_end=candidate.char_end,
+        )
+        _validate_span_text(source, span, max_chars=max_chars)
+
+    for classification in response.classifications:
+        if classification.char_start is None and classification.char_end is None:
+            continue
+        if classification.char_start is None or classification.char_end is None:
+            raise ProcessorValidationError("processor classification must provide both offsets or neither")
+        if classification.char_end <= classification.char_start:
+            raise ProcessorValidationError("processor classification has empty or negative range")
+        if classification.char_end > len(source):
+            raise ProcessorValidationError("processor classification is outside source text")
+
     return response

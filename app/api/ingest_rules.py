@@ -20,6 +20,7 @@ router = APIRouter(prefix="/ingest", tags=["ingest-rules"])
 @router.get(
     "/rule-packs/context",
     response_model=IngestRuleGuidance,
+    include_in_schema=False,
     summary="LLM guidance for proposing ingest rule packs",
     description=(
         "Returns schema and workflow guidance for LLM clients that want to teach "
@@ -36,6 +37,7 @@ def get_ingest_rule_context(
 @router.post(
     "/rule-packs/validate",
     response_model=IngestRulePackValidationResult,
+    include_in_schema=False,
     summary="Validate an ingest rule pack without storing it",
 )
 def validate_ingest_rule_pack(
@@ -49,6 +51,7 @@ def validate_ingest_rule_pack(
 @router.post(
     "/rule-packs",
     response_model=IngestRulePackRecord,
+    include_in_schema=False,
     summary="Create or update an ingest rule pack",
     description="Validates and persists a schema-driven ingest rule pack as SQLite configuration.",
 )
@@ -64,9 +67,34 @@ def upsert_ingest_rule_pack(
     return IngestRulePackRecord.model_validate(stored)
 
 
+@router.post(
+    "/rules",
+    response_model=IngestRulePackRecord,
+    summary="Create or update ingest rules",
+    description=(
+        "Single public rule-teaching endpoint. Stores deterministic ingest rule config "
+        "including semantic examples, entity hints, optional regexes, aliases, routing targets, "
+        "relationship hints, metadata fields, and optional dataset records."
+    ),
+)
+def upsert_ingest_rules(
+    pack: IngestRulePackRecord,
+    store: Annotated[SqliteStore, Depends(get_store)],
+) -> IngestRulePackRecord:
+    result = validate_rule_pack(pack, known_dataset_keys=set(store.list_datasets().keys()))
+    if not result.accepted:
+        raise HTTPException(status_code=422, detail={"errors": result.errors, "warnings": result.warnings})
+    for dataset in pack.datasets:
+        store.upsert_dataset(dataset.dataset_key, dataset.model_dump(mode="json"))
+    store.upsert_ingest_rule_pack(pack.key, pack.model_dump(mode="json"), namespace=pack.namespace)
+    stored = store.get_ingest_rule_pack(pack.key, namespace=pack.namespace)
+    return IngestRulePackRecord.model_validate(stored)
+
+
 @router.get(
     "/rule-packs",
     response_model=list[IngestRulePackRecord],
+    include_in_schema=False,
     summary="List persisted ingest rule packs",
 )
 def list_ingest_rule_packs(
@@ -83,6 +111,7 @@ def list_ingest_rule_packs(
 @router.get(
     "/rule-packs/{key}",
     response_model=IngestRulePackRecord,
+    include_in_schema=False,
     summary="Get one persisted ingest rule pack",
 )
 def get_ingest_rule_pack(
@@ -98,6 +127,7 @@ def get_ingest_rule_pack(
 
 @router.delete(
     "/rule-packs/{key}",
+    include_in_schema=False,
     summary="Delete one persisted ingest rule pack",
 )
 def delete_ingest_rule_pack(
@@ -113,6 +143,7 @@ def delete_ingest_rule_pack(
 @router.post(
     "/analyze",
     response_model=IngestAnalysisResult,
+    include_in_schema=False,
     summary="Analyze ingest text using active persisted rule packs",
     description=(
         "Proposal-only analyzer endpoint. It does not mutate memory, does not call "

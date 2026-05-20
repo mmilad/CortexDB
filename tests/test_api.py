@@ -298,8 +298,12 @@ def test_high_level_ingest_creates_main_session_and_raw_text(client):
     assert body["message"]["content"] == "remember this chat turn"
     assert body["message"]["raw_text_id"] == body["raw_text"]["id"]
     assert body["raw_text"]["text"] == "remember this chat turn"
+    assert {"session", "message", "raw_text", "derived"} <= set(body)
+    assert "trace" in body
+    assert body["trace"]["chunks_written"] >= 1
+    assert body["trace"]["graph_edges_written"] >= 1
     job_names = {job["name"] for job in body["derived"]}
-    assert {"logic_analysis", "session_memory", "primitive_memory", "graph_edges"} <= job_names
+    assert {"processor", "logic_analysis", "session_memory", "primitive_memory", "graph_edges", "candidate_observations"} <= job_names
 
 
 def test_high_level_ingest_writes_logic_analysis_outputs(client):
@@ -356,10 +360,140 @@ def test_high_level_ingest_writes_logic_analysis_outputs(client):
     assert not any(rel["source_key"].startswith("raw-") and len(rel["source_key"]) == 20 for rel in rels)
     assert not any(rel["target_key"].startswith("msg-") and len(rel["target_key"]) == 20 for rel in rels)
 
-    assert store.count_memory_items("api_framework_routes") == 0
+    canonical_items = store.list_memory_items("api_framework_routes")
+    assert any(item["metadata"].get("memory_role") == "canonical_entity" for item in canonical_items)
     derived_by_name = {job["name"]: job for job in body["derived"]}
     assert derived_by_name["primitive_memory"]["item_ids"]
     assert "api_framework_routes" in derived_by_name["logic_analysis"]["dataset_keys"]
+    assert body["trace"]["route_targets"]
+    assert any(route["dataset_key"] == "api_framework_routes" for route in body["trace"]["route_targets"])
+    assert any(
+        entity["dataset_key"] == "api_framework_routes" and entity["name"] == "Mastra"
+        for entity in body["trace"]["canonical_entities"]
+    )
+
+
+def test_high_level_ingest_dedupes_repeated_entity_mentions_and_updates_canonical(client):
+    from app.store import get_store
+
+    pack = {
+        "key": "canonical_framework_logic",
+        "display_name": "Canonical Framework Logic",
+        "namespace": "canonical_namespace",
+        "primitive_rules": [
+            {
+                "kind": "framework",
+                "pattern": r"\bMastra\b",
+                "target_dataset_key": "canonical_frameworks",
+                "confidence": 0.9,
+            }
+        ],
+    }
+    assert client.post("/ingest/rules", json=pack).status_code == 200
+
+    first = client.post(
+        "/ingest",
+        json={
+            "session_id": "canonical_one",
+            "namespace": "canonical_namespace",
+            "text": "Mastra is useful. Mastra handles workflows.",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+    store = get_store()
+
+    observations = [
+        item for item in store.list_memory_items("ingest_primitives", limit=200)
+        if item["metadata"].get("raw_text_id") == first_body["raw_text"]["id"]
+        and item["metadata"].get("primitive_kind") == "framework"
+    ]
+    assert len(observations) == 1
+    assert observations[0]["metadata"]["memory_role"] == "observation"
+    assert observations[0]["metadata"]["mention_count"] == 2
+    assert len(observations[0]["metadata"]["mentions"]) == 2
+    assert first_body["trace"]["observations_written"] >= 1
+    assert first_body["trace"]["observation_kinds"]["framework"] == 1
+    assert first_body["trace"]["canonical_entities_upserted"] == 1
+    trace_entity = first_body["trace"]["canonical_entities"][0]
+    assert trace_entity["dataset_key"] == "canonical_frameworks"
+    assert trace_entity["entity_kind"] == "framework"
+    assert trace_entity["name"] == "Mastra"
+    assert trace_entity["observation_id"] == observations[0]["id"]
+    assert trace_entity["mention_count"] == 2
+
+    canonical_items = store.list_memory_items("canonical_frameworks", limit=20)
+    canonical_mastra = next(
+        item for item in canonical_items
+        if item["metadata"].get("canonical_name") == "Mastra"
+    )
+    assert canonical_mastra["metadata"]["memory_role"] == "canonical_entity"
+    assert canonical_mastra["metadata"]["evidence_count"] == 1
+    assert canonical_mastra["metadata"]["source_observation_ids"] == [observations[0]["id"]]
+
+    second = client.post(
+        "/ingest",
+        json={
+            "session_id": "canonical_two",
+            "namespace": "canonical_namespace",
+            "text": "Mastra should stay one canonical framework.",
+        },
+    )
+    assert second.status_code == 200
+
+    updated = store.get_memory_item(canonical_mastra["id"])
+    assert updated is not None
+    assert updated["metadata"]["evidence_count"] == 2
+    assert len(updated["metadata"]["source_observation_ids"]) == 2
+    assert set(updated["metadata"]["source_session_ids"]) == {"canonical_one", "canonical_two"}
+
+    relationships = store.list_relationships()
+    assert sum(
+        1 for rel in relationships
+        if rel["target_key"] == canonical_mastra["id"] and rel["edge_type"] == "shared_entity"
+    ) == 2
+
+
+def test_high_level_ingest_does_not_canonicalize_tasks(client):
+    from app.store import get_store
+
+    pack = {
+        "key": "task_observation_logic",
+        "display_name": "Task Observation Logic",
+        "namespace": "task_namespace",
+        "primitive_rules": [
+            {
+                "kind": "task",
+                "pattern": r"\bTODO\b",
+                "target_dataset_key": "task_targets_should_not_canonicalize",
+                "confidence": 0.75,
+            }
+        ],
+    }
+    assert client.post("/ingest/rules", json=pack).status_code == 200
+    response = client.post(
+        "/ingest",
+        json={
+            "session_id": "task_noncanonical",
+            "namespace": "task_namespace",
+            "text": "TODO: write tests. TODO: review docs.",
+        },
+    )
+    assert response.status_code == 200
+
+    store = get_store()
+    assert store.get_dataset("task_targets_should_not_canonicalize") is None
+    task_observations = [
+        item for item in store.list_memory_items("ingest_primitives", limit=200)
+        if item["metadata"].get("session_id") == "task_noncanonical"
+        and item["metadata"].get("primitive_kind") == "task"
+    ]
+    assert task_observations
+    assert all(item["metadata"]["memory_role"] == "observation" for item in task_observations)
+    body = response.json()
+    assert body["trace"]["canonical_entities"] == []
+    assert body["trace"]["canonical_entities_upserted"] == 0
+    assert body["trace"]["observation_kinds"]["task"] == len(task_observations)
 
 
 def test_high_level_ingest_derive_false_skips_logic_persistence(client):
@@ -379,6 +513,154 @@ def test_high_level_ingest_derive_false_skips_logic_persistence(client):
         item["metadata"].get("session_id") == "skip_logic"
         for item in store.list_memory_items("session_memory")
     )
+
+
+def test_high_level_ingest_uses_processor_sidecar_observations(client):
+    from app.api.ingest import get_processor_service
+    from app.schemas.processor import (
+        ProcessorCandidate,
+        ProcessorClassification,
+        ProcessorEntity,
+        ProcessorPhrase,
+        ProcessorResponse,
+        ProcessorSpan,
+    )
+    from app.store import get_store
+
+    class FakeProcessor:
+        provider = "sidecar"
+        url = "http://fake-processor"
+        strategy = "semantic"
+        classify_enabled = True
+        known_match_threshold = 0.7
+        candidate_threshold = 0.4
+        graceful_fallback = True
+
+        def is_enabled(self):  # noqa: ANN201
+            return True
+
+        async def process_text(self, request):  # noqa: ANN001, ANN201
+            text = request.text
+            mastra_start = text.index("Mastra")
+            return ProcessorResponse(
+                processor="fake-spacy-minilm",
+                processor_version="test/1",
+                strategy="semantic",
+                chunks=[
+                    ProcessorSpan(
+                        text=text,
+                        char_start=0,
+                        char_end=len(text),
+                        primitive="chunk",
+                    )
+                ],
+                entities=[
+                    ProcessorEntity(
+                        text="Mastra",
+                        label="PRODUCT",
+                        char_start=mastra_start,
+                        char_end=mastra_start + len("Mastra"),
+                        confidence=0.91,
+                    )
+                ],
+                phrases=[
+                    ProcessorPhrase(
+                        text="workflow framework",
+                        label="noun_phrase",
+                        char_start=text.index("workflow"),
+                        char_end=text.index("framework") + len("framework"),
+                        score=0.62,
+                    )
+                ],
+                classifications=[
+                    ProcessorClassification(
+                        label="framework",
+                        score=0.88,
+                        matched_rule_key="framework_rules",
+                        target_dataset_key="frameworks",
+                    ),
+                    ProcessorClassification(label="unknown_tooling_cluster", score=0.51),
+                ],
+                candidates=[
+                    ProcessorCandidate(
+                        label="workflow_tooling",
+                        text="workflow framework",
+                        char_start=text.index("workflow"),
+                        char_end=text.index("framework") + len("framework"),
+                        score=0.52,
+                        suggested_dataset_key="workflow_tools",
+                    )
+                ],
+            )
+
+    client.app.dependency_overrides[get_processor_service] = lambda: FakeProcessor()
+    try:
+        r = client.post(
+            "/ingest",
+            json={"session_id": "sidecar_session", "text": "Mastra is a workflow framework."},
+        )
+        assert r.status_code == 200
+    finally:
+        client.app.dependency_overrides.pop(get_processor_service, None)
+
+    store = get_store()
+    primitives = store.list_memory_items("ingest_primitives")
+    assert any(item["metadata"].get("source") == "processor_entity" for item in primitives)
+    assert any(item["metadata"].get("source") == "processor_classification" for item in primitives)
+
+    candidates = store.list_memory_items("ingest_candidates")
+    assert any(item["metadata"].get("source") == "processor_phrase" for item in candidates)
+    assert any(item["metadata"].get("source") == "processor_candidate" for item in candidates)
+    assert any(item["metadata"].get("candidate_label") == "unknown_tooling_cluster" for item in candidates)
+
+
+def test_ingest_rules_public_endpoint_stores_dataset_and_rule(client):
+    rule = {
+        "key": "public_framework_rules",
+        "display_name": "Public Framework Rules",
+        "semantic_rules": [
+            {
+                "kind": "framework",
+                "target_dataset_key": "public_frameworks",
+                "examples": ["Mastra orchestrates agent workflows."],
+                "threshold": 0.78,
+            }
+        ],
+        "entity_hints": [
+            {
+                "kind": "framework",
+                "spacy_labels": ["PRODUCT", "ORG"],
+                "noun_phrases": True,
+                "target_dataset_key": "public_frameworks",
+            }
+        ],
+        "primitive_rules": [
+            {
+                "kind": "framework_exact",
+                "pattern": r"\bMastra\b",
+                "target_dataset_key": "public_frameworks",
+            }
+        ],
+        "datasets": [
+            {
+                "dataset_key": "public_frameworks",
+                "display_name": "Public Frameworks",
+                "schema_version": "v1",
+                "semantic_description": "Framework knowledge created with public ingest rules.",
+                "usage_guidance": "Use for framework observations.",
+                "retrieval_capabilities": ["keyword"],
+            }
+        ],
+    }
+    r = client.post("/ingest/rules", json=rule)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["semantic_rules"][0]["kind"] == "framework"
+    assert body["entity_hints"][0]["spacy_labels"] == ["PRODUCT", "ORG"]
+
+    dataset = client.get("/datasets/public_frameworks")
+    assert dataset.status_code == 200
+    assert dataset.json()["display_name"] == "Public Frameworks"
 
 
 def test_high_level_ingest_appends_to_existing_session_history(client):
