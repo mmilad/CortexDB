@@ -25,6 +25,15 @@ CORTEXDB_EMBED_PROVIDER=none cortexdb-api --reload
 - OpenAPI JSON: `http://127.0.0.1:5000/openapi.json`
 - Health check: `http://127.0.0.1:5000/health`
 
+The safe deterministic processor is integrated into the main API by default:
+
+- `POST /processor/process/text`
+- `POST /processor/analyze/ingest`
+- `GET /processor/health`
+
+Set `CORTEXDB_PROCESSOR_CLIENT_PROVIDER=sidecar` and run `cortexdb-processor`
+only when you intentionally want a separate processor process.
+
 ---
 
 ## LLM Agent Workflow (Recommended)

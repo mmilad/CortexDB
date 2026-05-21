@@ -854,12 +854,39 @@ def test_hard_delete(client):
 # ---------------------------------------------------------------------------
 
 def test_capabilities(client):
+    from app import __version__
+
     r = client.get("/capabilities")
     assert r.status_code == 200
     body = r.json()
+    assert body["version"] == __version__
     assert body["llm_inside"] is False
     assert "llm_context_endpoints" in body
     assert "mcp_endpoint" in body
+    assert body["processor"]["endpoints"]["process_text"] == "/processor/process/text"
+
+
+def test_processor_routes_are_integrated_into_main_api(client):
+    health = client.get("/processor/health")
+    assert health.status_code == 200
+    assert health.json()["service"] == "cortexdb-processor"
+
+    r = client.post(
+        "/processor/process/text",
+        json={
+            "text": "TODO: wire the processor into the app.",
+            "strategy": "safe",
+            "max_chars": 100,
+            "overlap_chars": 0,
+            "extract_primitives": True,
+            "metadata": {},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["strategy"] == "safe"
+    assert body["chunks"][0]["text"] == "TODO: wire the processor into the app."
+    assert body["primitives"][0]["kind"] == "task"
 
 
 # ---------------------------------------------------------------------------

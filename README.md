@@ -71,6 +71,13 @@ API docs: `http://127.0.0.1:5000/docs`
 
 End-to-end example: `python examples/quickstart.py`
 
+The safe deterministic text processor runs in-process by default, so
+`cortexdb-api` is enough for normal ingest and processor usage. Its HTTP helper
+endpoints are mounted under `/processor/*`, for example
+`POST /processor/process/text` and `POST /processor/analyze/ingest`. If you want
+the processor isolated as a separate process, run `cortexdb-processor --reload`
+and set `CORTEXDB_PROCESSOR_CLIENT_PROVIDER=sidecar`.
+
 For deterministic chunking of text, Markdown files, and directories before
 ingest, see the [Ingest Pipeline usage guide](./docs/USAGE.md#ingest-pipeline).
 

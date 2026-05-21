@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api import capabilities, context, datasets, graph, health, ingest, ingest_rules, memory, relationships, sessions, tools
 from app.mcp import server as mcp_server
+from app.processors.router import router as processor_router
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -16,3 +17,4 @@ api_router.include_router(sessions.router)
 api_router.include_router(context.router)
 api_router.include_router(graph.router)
 api_router.include_router(mcp_server.router)
+api_router.include_router(processor_router, prefix="/processor")

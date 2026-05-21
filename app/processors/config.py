@@ -30,7 +30,7 @@ def _env(primary: str, legacy: str, default: str) -> str:
 
 @dataclass(frozen=True)
 class ProcessorConfig:
-    provider: ProcessorProvider = "none"
+    provider: ProcessorProvider = "local"
     url: str = "http://127.0.0.1:5010"
     strategy: SidecarStrategy = "safe"
     classify: bool = False
@@ -40,7 +40,7 @@ class ProcessorConfig:
 
     @classmethod
     def from_env(cls) -> "ProcessorConfig":
-        provider = _env(_PROVIDER_ENV, _LEGACY_PROVIDER_ENV, "none").lower()
+        provider = _env(_PROVIDER_ENV, _LEGACY_PROVIDER_ENV, "local").lower()
         if provider not in ("none", "sidecar", "local"):
             provider = "none"
 

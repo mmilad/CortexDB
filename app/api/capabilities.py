@@ -2,6 +2,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 
+from app import __version__
 from app.embed.service import EmbeddingService, get_embedding_service
 from app.llm import LLMService, get_llm_service
 from app.processors import ProcessorService, get_processor_service
@@ -22,7 +23,7 @@ def capabilities(
     rel_count = len(store.adjacency())
     return {
         "service": "cortexdb",
-        "version": "0.3.0",
+        "version": __version__,
         "llm_inside": False,
         "llm_provider": {
             "enabled": llm_svc.is_enabled(),
@@ -37,7 +38,12 @@ def capabilities(
         "processor": {
             "enabled": processor_svc.is_enabled(),
             "provider": processor_svc.provider,
-            "url": processor_svc.url if processor_svc.is_enabled() else None,
+            "url": processor_svc.url if processor_svc.provider == "sidecar" else None,
+            "endpoints": {
+                "health": "/processor/health",
+                "process_text": "/processor/process/text",
+                "analyze_ingest": "/processor/analyze/ingest",
+            },
         },
         "resources": {
             "datasets": list(datasets.keys()),
