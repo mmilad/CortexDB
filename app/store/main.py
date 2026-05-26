@@ -611,6 +611,106 @@ class SqliteStore:
         rows = self._conn.execute("SELECT * FROM sessions ORDER BY updated_at DESC").fetchall()
         return [self._row_to_session(r) for r in rows]
 
+    def update_session(
+        self,
+        session_id: str,
+        *,
+        type: str | None = None,
+        scope_mode: str | None = None,
+        namespace: str | None = None,
+        dataset_policy: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        existing = self.get_session(session_id)
+        if existing is None:
+            return None
+        self._conn.execute(
+            """UPDATE sessions
+               SET type = ?,
+                   scope_mode = ?,
+                   namespace = ?,
+                   dataset_policy = ?,
+                   metadata = ?,
+                   updated_at = datetime('now')
+               WHERE id = ?""",
+            (
+                type if type is not None else existing["type"],
+                scope_mode if scope_mode is not None else existing["scope_mode"],
+                namespace if namespace is not None else existing["namespace"],
+                dataset_policy if dataset_policy is not None else existing["dataset_policy"],
+                json.dumps(metadata if metadata is not None else existing["metadata"]),
+                session_id,
+            ),
+        )
+        self._conn.commit()
+        return self.get_session(session_id)
+
+    def rename_session(self, session_id: str, new_session_id: str) -> dict[str, Any] | None:
+        if session_id == new_session_id:
+            return self.get_session(session_id)
+        if self.get_session(session_id) is None or self.get_session(new_session_id) is not None:
+            return None
+        self._conn.execute("UPDATE sessions SET id = ?, updated_at = datetime('now') WHERE id = ?", (new_session_id, session_id))
+        self._conn.execute("UPDATE session_messages SET session_id = ? WHERE session_id = ?", (new_session_id, session_id))
+        self._conn.execute("UPDATE session_summaries SET session_id = ? WHERE session_id = ?", (new_session_id, session_id))
+        self._conn.execute(
+            """UPDATE relationships
+               SET source_key = CASE WHEN source_type = 'session' AND source_key = ? THEN ? ELSE source_key END,
+                   target_key = CASE WHEN target_type = 'session' AND target_key = ? THEN ? ELSE target_key END
+               WHERE (source_type = 'session' AND source_key = ?)
+                  OR (target_type = 'session' AND target_key = ?)""",
+            (session_id, new_session_id, session_id, new_session_id, session_id, session_id),
+        )
+        self._conn.commit()
+        return self.get_session(new_session_id)
+
+    def delete_session(self, session_id: str, *, delete_related_chunks: bool = False) -> bool:
+        if self.get_session(session_id) is None:
+            return False
+
+        message_rows = self._conn.execute(
+            "SELECT id, raw_text_id FROM session_messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        message_ids = [row["id"] for row in message_rows]
+        raw_text_ids = [row["raw_text_id"] for row in message_rows if row["raw_text_id"]]
+
+        memory_item_ids: list[str] = []
+        if delete_related_chunks:
+            raw_text_id_set = set(raw_text_ids)
+            message_id_set = set(message_ids)
+            item_rows = self._conn.execute("SELECT * FROM memory_items").fetchall()
+            for row in item_rows:
+                metadata = json.loads(row["metadata"])
+                if (
+                    metadata.get("session_id") == session_id
+                    or metadata.get("raw_text_id") in raw_text_id_set
+                    or metadata.get("session_message_id") in message_id_set
+                ):
+                    memory_item_ids.append(row["id"])
+
+        related_keys = [session_id, *message_ids]
+        if delete_related_chunks:
+            related_keys.extend([*raw_text_ids, *memory_item_ids])
+        if related_keys:
+            placeholders = ",".join("?" for _ in related_keys)
+            self._conn.execute(
+                f"DELETE FROM relationships WHERE source_key IN ({placeholders}) OR target_key IN ({placeholders})",
+                [*related_keys, *related_keys],
+            )
+
+        for item_id in memory_item_ids:
+            self.delete_memory_item(item_id)
+
+        self._conn.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
+        self._conn.execute("DELETE FROM session_summaries WHERE session_id = ?", (session_id,))
+        if delete_related_chunks and raw_text_ids:
+            placeholders = ",".join("?" for _ in raw_text_ids)
+            self._conn.execute(f"DELETE FROM raw_texts WHERE id IN ({placeholders})", raw_text_ids)
+        self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        self._conn.commit()
+        return True
+
     def insert_raw_text(self, raw: dict[str, Any]) -> None:
         self._conn.execute(
             """INSERT INTO raw_texts

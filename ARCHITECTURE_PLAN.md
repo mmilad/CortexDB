@@ -240,7 +240,106 @@ Standardize ingestion stages:
 
 Version every embedding model used. You will need re-embedding jobs later.
 
-## 10) Lifecycles and Retention
+## 10) Known Facts Promotion
+
+Known facts are the planned durable memory layer for facts that should survive
+chat-session cleanup and be retrieved ahead of raw chat chunks. `/ingest` remains
+the only required gateway for memory handling; no separate memory-management
+routes are needed for the promotion workflow.
+
+### 10.1 Built-in Dataset
+
+Introduce a CortexDB-managed `known_facts` dataset. It stores canonical facts as
+regular memory items with structured metadata:
+
+- `memory_role: canonical_fact`
+- `subject`, `predicate`, `object`
+- `fact_type`, `status`, `confidence`
+- `source_session_ids`, `source_raw_text_ids`, `source_message_ids`
+- `supersedes`, `superseded_by`
+
+`known_facts` covers all durable facts, not only personal facts. Examples include
+user facts, preferences, project facts, operational decisions, and stable domain
+facts. Raw chunks remain provenance; canonical facts become the preferred
+retrieval target for direct factual questions.
+
+### 10.2 Promotion Flow
+
+Promotion is hybrid from the start:
+
+1. `/ingest` writes the session message, raw text, and session-memory chunks as
+   it does today.
+2. A deterministic pass extracts obvious fact candidates such as:
+   - "my cat's name is Miso"
+   - "X is Y"
+   - "remember that X"
+   - correction markers such as "actually", "not X, Y", or "changed to"
+3. An LLM promotion worker receives:
+   - a master memory instruction
+   - routed subinstructions relevant to the current text
+   - current text/chunks
+   - existing potentially related facts
+   - a strict JSON output schema
+4. Promotion output uses explicit actions:
+   - `create_fact`
+   - `update_fact`
+   - `supersede_fact`
+   - `ignore`
+
+Duplicate facts merge into the active canonical fact and add evidence/provenance
+instead of creating duplicate active facts.
+
+### 10.3 Supersession Model
+
+Corrections must preserve history. If the user says "actually my cat's name is
+Luna" after "my cat's name is Miso", CortexDB should mark the Miso fact as
+superseded and make the Luna fact active. Contradictions create a supersession
+chain rather than silently overwriting older evidence.
+
+Superseded facts are excluded from normal retrieval by default, but remain
+available as provenance for debugging, audit, and future admin workflows.
+
+### 10.4 Instruction Routing
+
+Promotion instructions should be stored in the DB as structured instruction
+packs, not as one unbounded prompt blob. Use one global master instruction plus
+routed subinstructions.
+
+Initial instruction packs:
+
+- `known_facts_general`
+- `personal_facts`
+- `project_facts`
+- `preferences`
+- `corrections_and_supersession`
+
+Route instruction packs by keyword/BM25 first, with embeddings as a later
+enhancement if useful. Cap selected subinstructions per ingest so promotion
+prompts do not get flooded with irrelevant guidance.
+
+### 10.5 Context and Retention Behavior
+
+`/context` should rank active `known_facts` above raw chunks for direct factual
+prompts. If facts conflict and no active canonical fact is clear, return the
+highest-confidence fact plus conflict metadata.
+
+Session deletion keeps `known_facts` by default. `delete_related_chunks=true`
+may remove provenance chunks and raw texts, but active canonical facts should
+remain unless explicitly superseded or removed by a future admin workflow.
+
+### 10.6 Future Acceptance Tests
+
+- Ingest "my cat's name is Miso" creates an active canonical fact.
+- Asking context for "what is my cat's name?" retrieves the canonical fact above
+  raw chunks.
+- Ingest "actually my cat's name is Luna" marks Miso superseded and Luna active.
+- Deleting the session preserves the canonical fact.
+- Deleting with `delete_related_chunks=true` removes related chunks/provenance
+  but does not remove active canonical facts.
+- Duplicate statements increase evidence/provenance without creating duplicate
+  active facts.
+
+## 11) Lifecycles and Retention
 
 Define retention per memory class:
 - Ephemeral process state (short TTL).
@@ -253,7 +352,7 @@ Support:
 - hard delete
 - legal hold flags (if enterprise use)
 
-## 11) Suggested First API Capability Map (Pre-Endpoint)
+## 12) Suggested First API Capability Map (Pre-Endpoint)
 
 Before endpoint naming, define capability groups:
 
@@ -269,7 +368,7 @@ Before endpoint naming, define capability groups:
 - Re-embed and index maintenance jobs.
 - MCP capability descriptor/read endpoints.
 
-## 12) Minimal v1 Milestones
+## 13) Minimal v1 Milestones
 
 **Milestone 1: Foundation** ✅ Complete
 - Memory item schema + metadata filters.
@@ -293,7 +392,7 @@ Before endpoint naming, define capability groups:
 - Retention / TTL jobs — planned.
 - Observability dashboards — planned.
 
-## 13) Risks to Address Early
+## 14) Risks to Address Early
 
 - Over-sharing between agents because of weak namespace policy.
 - Poor chunking that degrades retrieval quality.
@@ -302,7 +401,7 @@ Before endpoint naming, define capability groups:
 - Dynamic dataset/tool metadata drift from actual table schemas.
 - Accidental reintroduction of hidden AI logic into service layer.
 
-## 14) Recommended Next Step
+## 15) Recommended Next Step
 
 Create a **domain model spec** with:
 - ERD-level entities and relationships.

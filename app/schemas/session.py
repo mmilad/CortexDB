@@ -24,6 +24,16 @@ class SessionRecord(BaseModel):
     updated_at: str | None = None
 
 
+class SessionUpdateRequest(BaseModel):
+    id: str | None = Field(default=None, min_length=1)
+    title: str | None = Field(default=None, min_length=1)
+    type: SessionType | None = None
+    scope_mode: ScopeMode | None = None
+    namespace: str | None = None
+    dataset_policy: DatasetPolicy | None = None
+    metadata: dict[str, Any] | None = None
+
+
 class RawTextRecord(BaseModel):
     id: str
     text: str

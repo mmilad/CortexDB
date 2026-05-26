@@ -675,6 +675,86 @@ def test_high_level_ingest_appends_to_existing_session_history(client):
     assert [m["role"] for m in history.json()] == ["user", "assistant"]
 
 
+def test_update_session_title(client):
+    r = client.post("/ingest", json={"session_id": "rename_me", "text": "hello"})
+    assert r.status_code == 200
+
+    renamed = client.patch("/sessions/rename_me", json={"title": "Project notes"})
+    assert renamed.status_code == 200
+    assert renamed.json()["id"] == "rename_me"
+    assert renamed.json()["metadata"]["title"] == "Project notes"
+
+    fetched = client.get("/sessions/rename_me")
+    assert fetched.status_code == 200
+    assert fetched.json()["metadata"]["title"] == "Project notes"
+
+
+def test_rename_session_id_keeps_history(client):
+    r = client.post("/ingest", json={"session_id": "old_chat", "text": "first name"})
+    assert r.status_code == 200
+
+    renamed = client.patch("/sessions/old_chat", json={"id": "new_chat", "title": "Renamed chat"})
+    assert renamed.status_code == 200
+    assert renamed.json()["id"] == "new_chat"
+    assert renamed.json()["metadata"]["title"] == "Renamed chat"
+
+    assert client.get("/sessions/old_chat").status_code == 404
+    history = client.get("/sessions/new_chat/history")
+    assert history.status_code == 200
+    assert [m["content"] for m in history.json()] == ["first name"]
+
+
+def test_rename_session_id_conflict(client):
+    assert client.post("/ingest", json={"session_id": "one", "text": "first"}).status_code == 200
+    assert client.post("/ingest", json={"session_id": "two", "text": "second"}).status_code == 200
+
+    renamed = client.patch("/sessions/one", json={"id": "two", "title": "Should not apply"})
+    assert renamed.status_code == 409
+    assert "title" not in client.get("/sessions/one").json()["metadata"]
+
+
+def test_delete_session_preserves_related_memory_by_default(client):
+    r = client.post("/ingest", json={"session_id": "discard_me", "text": "temporary chat"})
+    assert r.status_code == 200
+
+    deleted = client.delete("/sessions/discard_me")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] == "discard_me"
+    assert deleted.json()["delete_related_chunks"] is False
+    assert client.get("/sessions/discard_me").status_code == 404
+    assert client.get("/sessions/discard_me/history").status_code == 404
+
+    from app.store import get_store
+    store = get_store()
+    assert any(
+        item["metadata"].get("session_id") == "discard_me"
+        for item in store.list_memory_items("session_memory", include_deleted=True)
+    )
+
+
+def test_delete_session_can_remove_related_chunks(client):
+    r = client.post("/ingest", json={"session_id": "deep_discard", "text": "temporary chat"})
+    assert r.status_code == 200
+
+    deleted = client.delete("/sessions/deep_discard?delete_related_chunks=true")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] == "deep_discard"
+    assert deleted.json()["delete_related_chunks"] is True
+    assert client.get("/sessions/deep_discard").status_code == 404
+    assert client.get("/sessions/deep_discard/history").status_code == 404
+
+    from app.store import get_store
+    store = get_store()
+    raw_text_id = r.json()["raw_text"]["id"]
+    message_id = r.json()["message"]["id"]
+    assert all(
+        item["metadata"].get("session_id") != "deep_discard"
+        and item["metadata"].get("raw_text_id") != raw_text_id
+        and item["metadata"].get("session_message_id") != message_id
+        for item in store.list_memory_items("session_memory", include_deleted=True)
+    )
+
+
 def test_high_level_ingest_compacts_autocontext_when_threshold_is_exceeded(client):
     for i in range(4):
         r = client.post(

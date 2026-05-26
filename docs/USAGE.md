@@ -311,6 +311,27 @@ curl -X POST http://127.0.0.1:5000/context \
   -d '{"session_id": "main", "prompt": "credential rotation restart", "top_k": 5}'
 ```
 
+Rename a chat title, rename its session id, or delete the chat:
+
+```bash
+curl -X PATCH http://127.0.0.1:5000/sessions/main \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Project notes"}'
+
+curl -X PATCH http://127.0.0.1:5000/sessions/main \
+  -H "Content-Type: application/json" \
+  -d '{"id": "project_notes"}'
+
+curl -X DELETE http://127.0.0.1:5000/sessions/project_notes
+
+curl -X DELETE "http://127.0.0.1:5000/sessions/project_notes?delete_related_chunks=true"
+```
+
+By default, deleting a session removes the chat shell and message history but
+keeps raw texts and dataset-backed memory. Set `delete_related_chunks=true` for
+a deeper cleanup that also removes related raw texts and memory chunks or
+observations linked by `session_id`, `raw_text_id`, or `session_message_id`.
+
 ### Build chunks from a Markdown file
 
 ```python
