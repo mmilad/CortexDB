@@ -161,6 +161,12 @@ class PostgresStore:
                         dataset_key TEXT NOT NULL REFERENCES {datasets}(dataset_key) ON DELETE CASCADE,
                         raw_text TEXT NOT NULL,
                         metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                        scope_kind TEXT NOT NULL DEFAULT 'global',
+                        owner_id TEXT,
+                        project_key TEXT,
+                        agent_id TEXT,
+                        session_id TEXT,
+                        source_id TEXT,
                         embedding vector,
                         embedding_model TEXT,
                         is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
@@ -188,6 +194,24 @@ class PostgresStore:
                     summaries_session_idx=sql.Identifier(f"{self.schema}_summaries_session_idx"),
                     relationships_source_idx=sql.Identifier(f"{self.schema}_relationships_source_idx"),
                     relationships_target_idx=sql.Identifier(f"{self.schema}_relationships_target_idx"),
+                )
+            )
+            for column, definition in (
+                ("scope_kind", "TEXT NOT NULL DEFAULT 'global'"),
+                ("owner_id", "TEXT"),
+                ("project_key", "TEXT"),
+                ("agent_id", "TEXT"),
+                ("session_id", "TEXT"),
+                ("source_id", "TEXT"),
+            ):
+                cur.execute(
+                    sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} " + definition).format(
+                        table=self._table("memory_items"), column=sql.Identifier(column)
+                    )
+                )
+            cur.execute(
+                sql.SQL("CREATE INDEX IF NOT EXISTS {index} ON {table} (scope_kind, owner_id, project_key, agent_id, session_id)").format(
+                    index=sql.Identifier(f"{self.schema}_items_scope_idx"), table=self._table("memory_items")
                 )
             )
         self._conn.commit()
@@ -555,12 +579,33 @@ class PostgresStore:
         return int(row["n"] if row else 0)
 
     def insert_memory_item(self, item: dict[str, Any]) -> None:
+        scope = item.get("scope") or {}
         with self._conn.cursor() as cur:
-            cur.execute(sql.SQL("""INSERT INTO {table} (id, dataset_key, raw_text, metadata, embedding, embedding_model)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET dataset_key = EXCLUDED.dataset_key, raw_text = EXCLUDED.raw_text,
-                  metadata = EXCLUDED.metadata, embedding = EXCLUDED.embedding, embedding_model = EXCLUDED.embedding_model,
-                  updated_at = CURRENT_TIMESTAMP""").format(table=self._table("memory_items")), (item["id"], item["dataset_key"], item["raw_text"], item.get("metadata", {}), item.get("embedding"), item.get("embedding_model")))
+            cur.execute(
+                sql.SQL("""INSERT INTO {table}
+                    (id, dataset_key, raw_text, metadata, scope_kind, owner_id,
+                     project_key, agent_id, session_id, source_id, embedding, embedding_model)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                      dataset_key = EXCLUDED.dataset_key,
+                      raw_text = EXCLUDED.raw_text,
+                      metadata = EXCLUDED.metadata,
+                      scope_kind = EXCLUDED.scope_kind,
+                      owner_id = EXCLUDED.owner_id,
+                      project_key = EXCLUDED.project_key,
+                      agent_id = EXCLUDED.agent_id,
+                      session_id = EXCLUDED.session_id,
+                      source_id = EXCLUDED.source_id,
+                      embedding = EXCLUDED.embedding,
+                      embedding_model = EXCLUDED.embedding_model,
+                      updated_at = CURRENT_TIMESTAMP""").format(table=self._table("memory_items")),
+                (
+                    item["id"], item["dataset_key"], item["raw_text"], item.get("metadata", {}),
+                    scope.get("kind", "global"), scope.get("owner_id"), scope.get("project_key"),
+                    scope.get("agent_id"), scope.get("session_id"), scope.get("source_id"),
+                    item.get("embedding"), item.get("embedding_model"),
+                ),
+            )
         self._conn.commit()
 
     def list_memory_items(self, dataset_key: str, limit: int = 100, offset: int = 0, include_deleted: bool = False) -> list[dict[str, Any]]:
@@ -631,7 +676,8 @@ class PostgresStore:
             return True
         return value == criterion
 
-    def search_memory_items(self, dataset_key: str, query_vector: list[float] | None = None, top_k: int = 10, metadata_filters: dict[str, Any] | None = None, keyword_query: str | None = None, vector_weight: float = 1.0) -> list[dict[str, Any]]:
+    def search_memory_items(self, dataset_key: str, query_vector: list[float] | None = None, top_k: int = 10, metadata_filters: dict[str, Any] | None = None, keyword_query: str | None = None, vector_weight: float = 1.0, access: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        requested_top_k = top_k
         vector_select = ""
         params: list[Any] = []
         if query_vector is not None:
@@ -660,7 +706,25 @@ class PostgresStore:
         for item in items:
             item["score"] = vector_weight * item.get("vector_score", 0.0) + (1.0 - vector_weight) * item.get("keyword_score", 0.0)
         items.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-        return items[:top_k]
+        if access:
+            items = [item for item in items if self._scope_visible(item, access)]
+        return items[:requested_top_k]
+
+    @staticmethod
+    def _scope_visible(item: dict[str, Any], access: dict[str, Any]) -> bool:
+        scope = item.get("scope", {})
+        kind = scope.get("kind", "global")
+        if kind == "global":
+            return bool(access.get("include_global", True))
+        if kind == "personal":
+            return bool(access.get("principal_id") and scope.get("owner_id") == access.get("principal_id"))
+        if kind == "project":
+            return bool(access.get("project_key") and scope.get("project_key") == access.get("project_key"))
+        if kind == "agent":
+            return bool(access.get("agent_id") and scope.get("agent_id") == access.get("agent_id"))
+        if kind == "session":
+            return bool(access.get("session_id") and scope.get("session_id") == access.get("session_id"))
+        return False
 
     def update_memory_item_embedding(self, item_id: str, embedding: list[float], model_id: str) -> None:
         with self._conn.cursor() as cur:
@@ -671,6 +735,14 @@ class PostgresStore:
     def _row_to_item(row: dict[str, Any]) -> dict[str, Any]:
         result = dict(row)
         result["metadata"] = _json(result.get("metadata"))
+        result["scope"] = {
+            "kind": result.pop("scope_kind", "global"),
+            "owner_id": result.pop("owner_id", None),
+            "project_key": result.pop("project_key", None),
+            "agent_id": result.pop("agent_id", None),
+            "session_id": result.pop("session_id", None),
+            "source_id": result.pop("source_id", None),
+        }
         result["_embedding_raw"] = _vector(result.pop("embedding", None))
         result["is_deleted"] = bool(result.get("is_deleted"))
         for key in ("created_at", "updated_at"):

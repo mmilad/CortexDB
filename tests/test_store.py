@@ -424,6 +424,52 @@ def test_metadata_filter_created_at_operator(store):
     assert [r["id"] for r in results] == ["mft1"]
 
 
+def test_scope_access_filters_memory_items(store):
+    store.upsert_dataset("scoped", {})
+    store.insert_memory_item({
+        "id": "global-item", "dataset_key": "scoped", "raw_text": "shared",
+        "metadata": {}, "scope": {"kind": "global"},
+    })
+    store.insert_memory_item({
+        "id": "alice-item", "dataset_key": "scoped", "raw_text": "private",
+        "metadata": {}, "scope": {"kind": "personal", "owner_id": "alice"},
+    })
+    store.insert_memory_item({
+        "id": "other-item", "dataset_key": "scoped", "raw_text": "other private",
+        "metadata": {}, "scope": {"kind": "personal", "owner_id": "bob"},
+    })
+
+    results = store.search_memory_items(
+        "scoped",
+        query_vector=None,
+        keyword_query="private",
+        vector_weight=0.0,
+        access={"principal_id": "alice"},
+    )
+    assert [item["id"] for item in results] == ["alice-item"]
+
+
+def test_scope_access_allows_matching_project_and_agent(store):
+    store.upsert_dataset("project_scoped", {})
+    store.insert_memory_item({
+        "id": "project-item", "dataset_key": "project_scoped", "raw_text": "project note",
+        "metadata": {}, "scope": {"kind": "project", "project_key": "PLAN"},
+    })
+    store.insert_memory_item({
+        "id": "agent-item", "dataset_key": "project_scoped", "raw_text": "agent note",
+        "metadata": {}, "scope": {"kind": "agent", "agent_id": "coding"},
+    })
+
+    results = store.search_memory_items(
+        "project_scoped",
+        query_vector=None,
+        keyword_query="note",
+        vector_weight=0.0,
+        access={"project_key": "PLAN", "agent_id": "coding"},
+    )
+    assert {item["id"] for item in results} == {"project-item", "agent-item"}
+
+
 # ---------------------------------------------------------------------------
 # BM25 keyword scoring
 # ---------------------------------------------------------------------------

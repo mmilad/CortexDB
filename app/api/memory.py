@@ -22,6 +22,7 @@ from app.schemas.ingest import IngestTextRequest
 from app.schemas.memory import (
     IngestRequest,
     IngestResult,
+    KnowledgeScope,
     MemoryItem,
     SearchHit,
     SearchRequest,
@@ -43,6 +44,7 @@ def _row_to_memory_item(row: dict) -> MemoryItem:
         dataset_key=row["dataset_key"],
         raw_text=row["raw_text"],
         metadata=row["metadata"],
+        scope=KnowledgeScope(**row.get("scope", {})),
         embedding_model=row.get("embedding_model"),
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
@@ -176,6 +178,7 @@ async def search_items(
         metadata_filters=body.metadata_filters,
         keyword_query=body.keyword_query,
         vector_weight=body.vector_weight,
+        access=body.access.model_dump(),
     )
 
     total_searched = store.count_memory_items(dataset_key)

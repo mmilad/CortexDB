@@ -145,12 +145,18 @@ CREATE TABLE IF NOT EXISTS session_messages (
     FOREIGN KEY (summary_id) REFERENCES session_summaries(id)
 );
 
-CREATE TABLE IF NOT EXISTS memory_items (
-    id              TEXT PRIMARY KEY,
-    dataset_key     TEXT NOT NULL,
-    raw_text        TEXT NOT NULL,
-    metadata        TEXT NOT NULL DEFAULT '{}',
-    embedding       TEXT,
+    CREATE TABLE IF NOT EXISTS memory_items (
+        id              TEXT PRIMARY KEY,
+        dataset_key     TEXT NOT NULL,
+        raw_text        TEXT NOT NULL,
+        metadata        TEXT NOT NULL DEFAULT '{}',
+        scope_kind      TEXT NOT NULL DEFAULT 'global',
+        owner_id        TEXT,
+        project_key     TEXT,
+        agent_id        TEXT,
+        session_id      TEXT,
+        source_id       TEXT,
+        embedding       TEXT,
     embedding_model TEXT,
     is_deleted      INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -174,6 +180,12 @@ _MIGRATIONS = [
     "ALTER TABLE datasets ADD COLUMN embedding_model TEXT",
     "ALTER TABLE datasets ADD COLUMN embedded_at     TEXT",
     "ALTER TABLE memory_items ADD COLUMN is_deleted  INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE memory_items ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'global'",
+    "ALTER TABLE memory_items ADD COLUMN owner_id TEXT",
+    "ALTER TABLE memory_items ADD COLUMN project_key TEXT",
+    "ALTER TABLE memory_items ADD COLUMN agent_id TEXT",
+    "ALTER TABLE memory_items ADD COLUMN session_id TEXT",
+    "ALTER TABLE memory_items ADD COLUMN source_id TEXT",
     "ALTER TABLE datasets ADD COLUMN vec_dim INTEGER",
     "ALTER TABLE datasets ADD COLUMN created_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'",
     "ALTER TABLE datasets ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01 00:00:00'",
@@ -912,13 +924,22 @@ class SqliteStore:
 
     def insert_memory_item(self, item: dict[str, Any]) -> None:
         embedding = item.get("embedding")
+        scope = item.get("scope") or {}
         self._conn.execute(
             """INSERT INTO memory_items
-               (id, dataset_key, raw_text, metadata, embedding, embedding_model)
-               VALUES (:id, :dataset_key, :raw_text, :metadata, :embedding, :embedding_model)
+               (id, dataset_key, raw_text, metadata, scope_kind, owner_id, project_key,
+                agent_id, session_id, source_id, embedding, embedding_model)
+               VALUES (:id, :dataset_key, :raw_text, :metadata, :scope_kind, :owner_id,
+                :project_key, :agent_id, :session_id, :source_id, :embedding, :embedding_model)
                ON CONFLICT(id) DO UPDATE SET
                  raw_text        = excluded.raw_text,
                  metadata        = excluded.metadata,
+                 scope_kind      = excluded.scope_kind,
+                 owner_id        = excluded.owner_id,
+                 project_key     = excluded.project_key,
+                 agent_id        = excluded.agent_id,
+                 session_id      = excluded.session_id,
+                 source_id       = excluded.source_id,
                  embedding       = excluded.embedding,
                  embedding_model = excluded.embedding_model,
                  is_deleted      = 0,
@@ -928,6 +949,12 @@ class SqliteStore:
                 "dataset_key": item["dataset_key"],
                 "raw_text": item["raw_text"],
                 "metadata": json.dumps(item.get("metadata", {})),
+                "scope_kind": scope.get("kind", "global"),
+                "owner_id": scope.get("owner_id"),
+                "project_key": scope.get("project_key"),
+                "agent_id": scope.get("agent_id"),
+                "session_id": scope.get("session_id"),
+                "source_id": scope.get("source_id"),
                 "embedding": json.dumps(embedding) if embedding else None,
                 "embedding_model": item.get("embedding_model"),
             },
@@ -1009,6 +1036,7 @@ class SqliteStore:
         metadata_filters: dict[str, Any] | None = None,
         keyword_query: str | None = None,
         vector_weight: float = 1.0,
+        access: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Hybrid search over memory items: vector + optional keyword blending.
 
@@ -1026,22 +1054,53 @@ class SqliteStore:
         In hybrid mode, items without an embedding receive vector_score=0.
         """
         needs_vector = query_vector is not None
+        requested_top_k = top_k
+        if access:
+            # Scope filtering is applied after the existing ranking code. Ask
+            # the backend for the complete candidate set first so a private
+            # item cannot consume a public result slot.
+            top_k = max(top_k, self.count_memory_items(dataset_key))
 
         if needs_vector and keyword_query is None:
-            return self._search_vector_only(
+            result = self._search_vector_only(
                 dataset_key, query_vector, top_k, metadata_filters  # type: ignore[arg-type]
             )
+            return self._apply_access_filter(result, access, requested_top_k)
 
         if query_vector is None and keyword_query is not None:
-            return self._search_keyword_only(dataset_key, keyword_query, top_k, metadata_filters)
+            result = self._search_keyword_only(dataset_key, keyword_query, top_k, metadata_filters)
+            return self._apply_access_filter(result, access, requested_top_k)
 
         if needs_vector and keyword_query is not None:
-            return self._search_hybrid(
+            result = self._search_hybrid(
                 dataset_key, query_vector, keyword_query,  # type: ignore[arg-type]
                 top_k, metadata_filters, vector_weight
             )
+            return self._apply_access_filter(result, access, requested_top_k)
 
         return []
+
+    @staticmethod
+    def _scope_visible(item: dict[str, Any], access: dict[str, Any]) -> bool:
+        scope = item.get("scope", {})
+        kind = scope.get("kind", "global")
+        if kind == "global":
+            return bool(access.get("include_global", True))
+        if kind == "personal":
+            return bool(access.get("principal_id") and scope.get("owner_id") == access.get("principal_id"))
+        if kind == "project":
+            return bool(access.get("project_key") and scope.get("project_key") == access.get("project_key"))
+        if kind == "agent":
+            return bool(access.get("agent_id") and scope.get("agent_id") == access.get("agent_id"))
+        if kind == "session":
+            return bool(access.get("session_id") and scope.get("session_id") == access.get("session_id"))
+        return False
+
+    @classmethod
+    def _apply_access_filter(cls, items: list[dict[str, Any]], access: dict[str, Any] | None, top_k: int) -> list[dict[str, Any]]:
+        if not access:
+            return items[:top_k]
+        return [item for item in items if cls._scope_visible(item, access)][:top_k]
 
     # ------ internal search implementations ------
 
@@ -1335,6 +1394,14 @@ class SqliteStore:
     def _row_to_item(row: sqlite3.Row) -> dict[str, Any]:
         d = dict(row)
         d["metadata"] = json.loads(d["metadata"])
+        d["scope"] = {
+            "kind": d.pop("scope_kind", "global"),
+            "owner_id": d.pop("owner_id", None),
+            "project_key": d.pop("project_key", None),
+            "agent_id": d.pop("agent_id", None),
+            "session_id": d.pop("session_id", None),
+            "source_id": d.pop("source_id", None),
+        }
         raw_emb = d.pop("embedding", None)
         d["_embedding_raw"] = json.loads(raw_emb) if raw_emb else None
         d["is_deleted"] = bool(d.get("is_deleted", 0))

@@ -2,11 +2,38 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from app.schemas.processor import ProcessorJobResult
+
+ScopeKind = Literal["global", "personal", "project", "agent", "session"]
+
+
+class KnowledgeScope(BaseModel):
+    """Ownership metadata used for retrieval isolation."""
+
+    kind: ScopeKind = "global"
+    owner_id: str | None = None
+    project_key: str | None = None
+    agent_id: str | None = None
+    session_id: str | None = None
+    source_id: str | None = None
+
+
+class KnowledgeAccess(BaseModel):
+    """The caller's visibility context for a retrieval request.
+
+    Scope-specific rows are returned only when the corresponding identity is
+    supplied. Global rows are included by default.
+    """
+
+    principal_id: str | None = None
+    project_key: str | None = None
+    agent_id: str | None = None
+    session_id: str | None = None
+    include_global: bool = True
 
 
 class IngestItem(BaseModel):
@@ -30,6 +57,7 @@ class IngestItem(BaseModel):
             "Values are filterable at search time."
         ),
     )
+    scope: KnowledgeScope = Field(default_factory=KnowledgeScope)
 
 
 class IngestRequest(BaseModel):
@@ -54,6 +82,7 @@ class MemoryItem(BaseModel):
     dataset_key: str
     raw_text: str
     metadata: dict[str, Any]
+    scope: KnowledgeScope = Field(default_factory=KnowledgeScope)
     embedding_model: str | None
     created_at: str | None
     updated_at: str | None = None
@@ -102,6 +131,7 @@ class SearchRequest(BaseModel):
             "0.5 = equal blend. 0.0 = pure keyword search."
         ),
     )
+    access: KnowledgeAccess = Field(default_factory=KnowledgeAccess)
 
 
 class SearchHit(BaseModel):

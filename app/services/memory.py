@@ -54,6 +54,7 @@ async def ingest_items_to_dataset(
                 "dataset_key": dataset_key,
                 "raw_text": item.raw_text,
                 "metadata": item.metadata,
+                "scope": item.scope.model_dump(),
                 "embedding": vector,
                 "embedding_model": model_id,
             }
