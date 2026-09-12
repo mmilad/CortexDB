@@ -238,6 +238,7 @@ def get_item(
     dataset_key: str,
     item_id: str,
     store: Annotated[SqliteStore, Depends(get_store)],
+    access: Annotated[KnowledgeAccess, Depends()],
     include_deleted: bool = Query(
         default=False,
         description="When true, a soft-deleted item is returned instead of 404.",
@@ -245,6 +246,8 @@ def get_item(
 ) -> MemoryItem:
     row = store.get_memory_item(item_id)
     if not row or row["dataset_key"] != dataset_key:
+        raise HTTPException(status_code=404, detail="item not found")
+    if not store.is_memory_item_visible(row, access.model_dump()):
         raise HTTPException(status_code=404, detail="item not found")
     if row.get("is_deleted") and not include_deleted:
         raise HTTPException(status_code=404, detail="item not found")
