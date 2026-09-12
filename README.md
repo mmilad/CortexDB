@@ -48,6 +48,34 @@ Override: `CORTEXDB_DB_PATH=/path/to/file.sqlite`
 API port override: `CORTEXDB_API_PORT=5001 cortexdb-api --reload`
 Editable local defaults: copy `.env.example` or export the `CORTEXDB_API_*` variables in your shell before starting the server.
 
+### PostgreSQL + pgvector
+
+The repository includes a development compose file for a persistent local
+PostgreSQL/pgvector service:
+
+```bash
+docker compose up -d postgres
+pip install -e ".[postgres]"
+export CORTEXDB_DATABASE_URL=postgresql://projectplaner:projectplaner-dev@127.0.0.1:5432/projectplaner
+cortexdb-api
+```
+
+The existing Ollama service can remain on the host. To run a disposable local
+Ollama container instead, use `docker compose --profile embedding up -d ollama`
+and set `CORTEXDB_EMBED_URL=http://127.0.0.1:11434`. CortexDB still owns
+embedding calls and stores the model identifier with every vector.
+
+To migrate an existing SQLite database, run the idempotent migration command
+after PostgreSQL is healthy:
+
+```bash
+cortexdb-migrate --source cortexdb.sqlite
+```
+
+The command preserves stable IDs, does not modify SQLite, and verifies counts
+for datasets, tools, rule packs, relationships, sessions, source text,
+messages, summaries, and memory items before it exits successfully.
+
 Embedding defaults to **nomic-embed-text via Ollama**. On startup CortexDB
 checks if Ollama is running; if not, it starts `ollama serve` and pulls the
 model automatically. To use a different provider:

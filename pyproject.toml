@@ -15,6 +15,7 @@ dependencies = [
 [project.scripts]
 cortexdb-api = "app.serve:main"
 cortexdb-processor = "app.processors.serve:main"
+cortexdb-migrate = "app.migrate:main"
 # Local MCP stdio server — use with Claude Desktop, Cursor, Continue, etc.
 # Example claude_desktop_config.json entry:
 #   { "command": "cortexdb-mcp", "args": [] }

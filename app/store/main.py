@@ -314,7 +314,7 @@ class SqliteStore:
     def list_datasets_with_embeddings(self) -> list[dict[str, Any]]:
         """Return all datasets that have a stored embedding."""
         rows = self._conn.execute(
-            "SELECT dataset_key, data, embedding, embedding_model, created_at, updated_at "
+            "SELECT dataset_key, data, embed_raw, embedding, embedding_model, created_at, updated_at "
             "FROM datasets WHERE embedding IS NOT NULL"
         ).fetchall()
         result = []
@@ -325,6 +325,7 @@ class SqliteStore:
             result.append({
                 "dataset_key": r["dataset_key"],
                 "data": data,
+                "embed_raw": r["embed_raw"],
                 "embedding": json.loads(r["embedding"]),
                 "embedding_model": r["embedding_model"],
             })
@@ -753,6 +754,13 @@ class SqliteStore:
     def get_raw_text(self, raw_text_id: str) -> dict[str, Any] | None:
         row = self._conn.execute("SELECT * FROM raw_texts WHERE id = ?", (raw_text_id,)).fetchone()
         return self._row_to_raw_text(row) if row else None
+
+    def list_raw_texts(self, *, limit: int = 2_147_483_647, offset: int = 0) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT * FROM raw_texts ORDER BY created_at ASC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [self._row_to_raw_text(row) for row in rows]
 
     def insert_session_message(self, message: dict[str, Any]) -> None:
         self._conn.execute(

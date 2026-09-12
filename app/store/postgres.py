@@ -20,11 +20,13 @@ try:  # Keep SQLite-only installs usable without the optional extra.
     import psycopg
     from psycopg import sql
     from psycopg.rows import dict_row
+    from psycopg.types.json import Jsonb
     from pgvector.psycopg import register_vector
 except ImportError:  # pragma: no cover - exercised only when Postgres is requested
     psycopg = None  # type: ignore[assignment]
     sql = None  # type: ignore[assignment]
     dict_row = None  # type: ignore[assignment]
+    Jsonb = None  # type: ignore[assignment,misc]
     register_vector = None  # type: ignore[assignment]
 
 
@@ -46,6 +48,13 @@ def _vector(value: Any) -> list[float] | None:
         raw = value.strip("[]")
         return [float(part) for part in raw.split(",") if part.strip()]
     return [float(part) for part in value]
+
+
+def _jsonb(value: Any) -> Any:
+    """Explicitly adapt Python containers to PostgreSQL JSONB values."""
+    if Jsonb is None:  # pragma: no cover - guarded by PostgresStore.__init__
+        raise RuntimeError("PostgreSQL JSON support is unavailable")
+    return Jsonb(value)
 
 
 class PostgresStore:
@@ -236,7 +245,7 @@ class PostgresStore:
                        ON CONFLICT (dataset_key) DO UPDATE SET
                          data = EXCLUDED.data, updated_at = CURRENT_TIMESTAMP"""
                 ).format(table=self._table("datasets")),
-                (key, data),
+                (key, _jsonb(data)),
             )
         self._conn.commit()
 
@@ -284,18 +293,27 @@ class PostgresStore:
 
     def list_datasets_with_embeddings(self) -> list[dict[str, Any]]:
         with self._conn.cursor() as cur:
-            cur.execute(sql.SQL("SELECT dataset_key, data, embedding, embedding_model, created_at, updated_at FROM {table} WHERE embedding IS NOT NULL").format(table=self._table("datasets")))
+            cur.execute(sql.SQL("SELECT dataset_key, data, embed_raw, embedding, embedding_model, created_at, updated_at FROM {table} WHERE embedding IS NOT NULL").format(table=self._table("datasets")))
             rows = cur.fetchall()
         result = []
         for row in rows:
             data = dict(_json(row["data"]))
             data.setdefault("created_at", row["created_at"].isoformat() if row["created_at"] else None)
             data.setdefault("updated_at", row["updated_at"].isoformat() if row["updated_at"] else None)
-            result.append({"dataset_key": row["dataset_key"], "data": data, "embedding": _vector(row["embedding"]), "embedding_model": row["embedding_model"]})
+            result.append({"dataset_key": row["dataset_key"], "data": data, "embed_raw": row["embed_raw"], "embedding": _vector(row["embedding"]), "embedding_model": row["embedding_model"]})
         return result
 
     def delete_dataset(self, key: str) -> bool:
         with self._conn.cursor() as cur:
+            cur.execute(sql.SQL("SELECT 1 FROM {table} WHERE dataset_key = %s").format(table=self._table("datasets")), (key,))
+            if cur.fetchone() is None:
+                return False
+            cur.execute(
+                sql.SQL("DELETE FROM {rel} WHERE source_key = %s OR target_key = %s").format(
+                    rel=self._table("relationships")
+                ),
+                (key, key),
+            )
             cur.execute(sql.SQL("DELETE FROM {table} WHERE dataset_key = %s").format(table=self._table("datasets")), (key,))
             deleted = cur.rowcount > 0
         self._conn.commit()
@@ -304,7 +322,7 @@ class PostgresStore:
     def upsert_tool(self, key: str, data: dict[str, Any]) -> None:
         with self._conn.cursor() as cur:
             cur.execute(sql.SQL("""INSERT INTO {table} (tool_key, data) VALUES (%s, %s)
-                ON CONFLICT (tool_key) DO UPDATE SET data = EXCLUDED.data, updated_at = CURRENT_TIMESTAMP""").format(table=self._table("tools")), (key, data))
+                ON CONFLICT (tool_key) DO UPDATE SET data = EXCLUDED.data, updated_at = CURRENT_TIMESTAMP""").format(table=self._table("tools")), (key, _jsonb(data)))
         self._conn.commit()
 
     def get_tool(self, key: str) -> dict[str, Any] | None:
@@ -332,6 +350,15 @@ class PostgresStore:
 
     def delete_tool(self, key: str) -> bool:
         with self._conn.cursor() as cur:
+            cur.execute(sql.SQL("SELECT 1 FROM {table} WHERE tool_key = %s").format(table=self._table("tools")), (key,))
+            if cur.fetchone() is None:
+                return False
+            cur.execute(
+                sql.SQL("DELETE FROM {rel} WHERE source_key = %s OR target_key = %s").format(
+                    rel=self._table("relationships")
+                ),
+                (key, key),
+            )
             cur.execute(sql.SQL("DELETE FROM {table} WHERE tool_key = %s").format(table=self._table("tools")), (key,))
             deleted = cur.rowcount > 0
         self._conn.commit()
@@ -349,7 +376,7 @@ class PostgresStore:
         ns = self._namespace_key(namespace)
         with self._conn.cursor() as cur:
             cur.execute(sql.SQL("""INSERT INTO {table} (key, namespace, status, data) VALUES (%s, %s, %s, %s)
-                ON CONFLICT (namespace, key) DO UPDATE SET status = EXCLUDED.status, data = EXCLUDED.data, updated_at = CURRENT_TIMESTAMP""").format(table=self._table("ingest_rule_packs")), (key, ns, data.get("status", "active"), data))
+                ON CONFLICT (namespace, key) DO UPDATE SET status = EXCLUDED.status, data = EXCLUDED.data, updated_at = CURRENT_TIMESTAMP""").format(table=self._table("ingest_rule_packs")), (key, ns, data.get("status", "active"), _jsonb(data)))
         self._conn.commit()
 
     def get_ingest_rule_pack(self, key: str, namespace: str | None = None) -> dict[str, Any] | None:
@@ -389,7 +416,7 @@ class PostgresStore:
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET source_type = EXCLUDED.source_type, source_key = EXCLUDED.source_key,
                   target_type = EXCLUDED.target_type, target_key = EXCLUDED.target_key, edge_type = EXCLUDED.edge_type,
-                  join_fields = EXCLUDED.join_fields, description = EXCLUDED.description""").format(table=self._table("relationships")), (rel["id"], rel["source_type"], rel["source_key"], rel["target_type"], rel["target_key"], rel["edge_type"], rel.get("join_fields", []), rel.get("description", "")))
+                  join_fields = EXCLUDED.join_fields, description = EXCLUDED.description""").format(table=self._table("relationships")), (rel["id"], rel["source_type"], rel["source_key"], rel["target_type"], rel["target_key"], rel["edge_type"], _jsonb(rel.get("join_fields", [])), rel.get("description", "")))
         self._conn.commit()
 
     def get_relationship(self, rel_id: str) -> dict[str, Any] | None:
@@ -398,15 +425,18 @@ class PostgresStore:
             return cur.fetchone()
 
     def list_relationships(self, source_key: str | None = None, target_key: str | None = None) -> list[dict[str, Any]]:
-        if source_key or target_key:
-            key = source_key or target_key
-            query = sql.SQL("SELECT * FROM {table} WHERE source_key = %s OR target_key = %s").format(table=self._table("relationships"))
-            params = (key, key)
-        else:
-            query = sql.SQL("SELECT * FROM {table} ORDER BY id").format(table=self._table("relationships"))
-            params = ()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if source_key is not None:
+            clauses.append("source_key = %s")
+            params.append(source_key)
+        if target_key is not None:
+            clauses.append("target_key = %s")
+            params.append(target_key)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        query = sql.SQL("SELECT * FROM {table}" + where + " ORDER BY id").format(table=self._table("relationships"))
         with self._conn.cursor() as cur:
-            cur.execute(query, params)
+            cur.execute(query, tuple(params))
             rows = cur.fetchall()
         for row in rows:
             row["join_fields"] = _json(row["join_fields"])
@@ -432,7 +462,7 @@ class PostgresStore:
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET type = EXCLUDED.type, scope_mode = EXCLUDED.scope_mode,
                   namespace = EXCLUDED.namespace, dataset_policy = EXCLUDED.dataset_policy,
-                  metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP""").format(table=self._table("sessions")), (session["id"], session.get("type", "chat"), session.get("scope_mode", "namespace"), session.get("namespace"), session.get("dataset_policy", "create_if_needed"), session.get("metadata", {})))
+                  metadata = EXCLUDED.metadata, updated_at = CURRENT_TIMESTAMP""").format(table=self._table("sessions")), (session["id"], session.get("type", "chat"), session.get("scope_mode", "namespace"), session.get("namespace"), session.get("dataset_policy", "create_if_needed"), _jsonb(session.get("metadata", {}))))
         self._conn.commit()
 
     def ensure_session(self, session_id: str = "main", *, type: str = "chat", scope_mode: str = "namespace", namespace: str | None = None, dataset_policy: str = "create_if_needed", metadata: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -473,6 +503,16 @@ class PostgresStore:
             cur.execute(sql.SQL("UPDATE {table} SET id = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s").format(table=self._table("sessions")), (new_session_id, session_id))
             cur.execute(sql.SQL("UPDATE {table} SET session_id = %s WHERE session_id = %s").format(table=self._table("session_messages")), (new_session_id, session_id))
             cur.execute(sql.SQL("UPDATE {table} SET session_id = %s WHERE session_id = %s").format(table=self._table("session_summaries")), (new_session_id, session_id))
+            cur.execute(
+                sql.SQL(
+                    """UPDATE {table}
+                       SET source_key = CASE WHEN source_type = 'session' AND source_key = %s THEN %s ELSE source_key END,
+                           target_key = CASE WHEN target_type = 'session' AND target_key = %s THEN %s ELSE target_key END
+                       WHERE (source_type = 'session' AND source_key = %s)
+                          OR (target_type = 'session' AND target_key = %s)"""
+                ).format(table=self._table("relationships")),
+                (session_id, new_session_id, session_id, new_session_id, session_id, session_id),
+            )
         self._conn.commit()
         return self.get_session(new_session_id)
 
@@ -482,6 +522,7 @@ class PostgresStore:
         with self._conn.cursor() as cur:
             if delete_related_chunks:
                 cur.execute(sql.SQL("DELETE FROM {table} WHERE id IN (SELECT raw_text_id FROM {messages} WHERE session_id = %s AND raw_text_id IS NOT NULL)").format(table=self._table("raw_texts"), messages=self._table("session_messages")), (session_id,))
+            cur.execute(sql.SQL("DELETE FROM {table} WHERE source_key = %s OR target_key = %s").format(table=self._table("relationships")), (session_id, session_id))
             cur.execute(sql.SQL("DELETE FROM {table} WHERE id = %s").format(table=self._table("sessions")), (session_id,))
         self._conn.commit()
         return True
@@ -489,7 +530,12 @@ class PostgresStore:
     def insert_raw_text(self, raw: dict[str, Any]) -> None:
         with self._conn.cursor() as cur:
             cur.execute(sql.SQL("""INSERT INTO {table} (id, text, source, relations, score, metadata, embedding, embedding_model)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""").format(table=self._table("raw_texts")), (raw["id"], raw["text"], raw.get("source", "unknown"), raw.get("relations", {}), raw.get("score"), raw.get("metadata", {}), raw.get("embedding"), raw.get("embedding_model")))
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                  text = EXCLUDED.text, source = EXCLUDED.source,
+                  relations = EXCLUDED.relations, score = EXCLUDED.score,
+                  metadata = EXCLUDED.metadata, embedding = EXCLUDED.embedding,
+                  embedding_model = EXCLUDED.embedding_model""").format(table=self._table("raw_texts")), (raw["id"], raw["text"], raw.get("source", "unknown"), _jsonb(raw.get("relations", {})), raw.get("score"), _jsonb(raw.get("metadata", {})), raw.get("embedding"), raw.get("embedding_model")))
         self._conn.commit()
 
     def get_raw_text(self, raw_text_id: str) -> dict[str, Any] | None:
@@ -498,10 +544,27 @@ class PostgresStore:
             row = cur.fetchone()
         return self._row_to_raw_text(row) if row else None
 
+    def list_raw_texts(self, *, limit: int = 2_147_483_647, offset: int = 0) -> list[dict[str, Any]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("SELECT * FROM {table} ORDER BY created_at ASC LIMIT %s OFFSET %s").format(
+                    table=self._table("raw_texts")
+                ),
+                (limit, offset),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_raw_text(row) for row in rows]
+
     def insert_session_message(self, message: dict[str, Any]) -> None:
         with self._conn.cursor() as cur:
             cur.execute(sql.SQL("""INSERT INTO {table} (id, session_id, role, content, raw_text_id, token_estimate, autocontext_enabled, summary_id, metadata)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""").format(table=self._table("session_messages")), (message["id"], message["session_id"], message.get("role", "user"), message["content"], message.get("raw_text_id"), message.get("token_estimate", 0), message.get("autocontext_enabled", True), message.get("summary_id"), message.get("metadata", {})))
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                  session_id = EXCLUDED.session_id, role = EXCLUDED.role,
+                  content = EXCLUDED.content, raw_text_id = EXCLUDED.raw_text_id,
+                  token_estimate = EXCLUDED.token_estimate,
+                  autocontext_enabled = EXCLUDED.autocontext_enabled,
+                  summary_id = EXCLUDED.summary_id, metadata = EXCLUDED.metadata""").format(table=self._table("session_messages")), (message["id"], message["session_id"], message.get("role", "user"), message.get("content", ""), message.get("raw_text_id"), message.get("token_estimate", 0), message.get("autocontext_enabled", True), message.get("summary_id"), _jsonb(message.get("metadata", {}))))
         self._conn.commit()
 
     def list_session_messages(self, session_id: str, *, limit: int = 100, offset: int = 0, autocontext_only: bool = False) -> list[dict[str, Any]]:
@@ -514,7 +577,12 @@ class PostgresStore:
     def insert_session_summary(self, summary: dict[str, Any]) -> None:
         with self._conn.cursor() as cur:
             cur.execute(sql.SQL("""INSERT INTO {table} (id, session_id, summary, message_ids, token_estimate, metadata)
-                VALUES (%s, %s, %s, %s, %s, %s)""").format(table=self._table("session_summaries")), (summary["id"], summary["session_id"], summary["summary"], summary.get("message_ids", []), summary.get("token_estimate", 0), summary.get("metadata", {})))
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                  session_id = EXCLUDED.session_id, summary = EXCLUDED.summary,
+                  message_ids = EXCLUDED.message_ids,
+                  token_estimate = EXCLUDED.token_estimate,
+                  metadata = EXCLUDED.metadata""").format(table=self._table("session_summaries")), (summary["id"], summary["session_id"], summary["summary"], _jsonb(summary.get("message_ids", [])), summary.get("token_estimate", 0), _jsonb(summary.get("metadata", {}))))
         self._conn.commit()
 
     def list_session_summaries(self, session_id: str) -> list[dict[str, Any]]:
@@ -584,8 +652,8 @@ class PostgresStore:
             cur.execute(
                 sql.SQL("""INSERT INTO {table}
                     (id, dataset_key, raw_text, metadata, scope_kind, owner_id,
-                     project_key, agent_id, session_id, source_id, embedding, embedding_model)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     project_key, agent_id, session_id, source_id, embedding, embedding_model, is_deleted)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (id) DO UPDATE SET
                       dataset_key = EXCLUDED.dataset_key,
                       raw_text = EXCLUDED.raw_text,
@@ -598,12 +666,13 @@ class PostgresStore:
                       source_id = EXCLUDED.source_id,
                       embedding = EXCLUDED.embedding,
                       embedding_model = EXCLUDED.embedding_model,
+                      is_deleted = EXCLUDED.is_deleted,
                       updated_at = CURRENT_TIMESTAMP""").format(table=self._table("memory_items")),
                 (
-                    item["id"], item["dataset_key"], item["raw_text"], item.get("metadata", {}),
+                    item["id"], item["dataset_key"], item["raw_text"], _jsonb(item.get("metadata", {})),
                     scope.get("kind", "global"), scope.get("owner_id"), scope.get("project_key"),
                     scope.get("agent_id"), scope.get("session_id"), scope.get("source_id"),
-                    item.get("embedding"), item.get("embedding_model"),
+                    item.get("embedding"), item.get("embedding_model"), bool(item.get("is_deleted", False)),
                 ),
             )
         self._conn.commit()

@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-projectplaner}
+      POSTGRES_USER: ${POSTGRES_USER:-projectplaner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-projectplaner-dev}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - cortexdb-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Optional local embedding service. CortexDB can also use an Ollama service
+  # already running on the host; in that case do not enable this profile.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["embedding"]
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - cortexdb-ollama:/root/.ollama
+
+volumes:
+  cortexdb-postgres:
+  cortexdb-ollama:

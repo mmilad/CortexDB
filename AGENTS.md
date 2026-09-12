@@ -238,7 +238,7 @@ Before starting a task:
 
 ## Known planned work (future, not yet implemented)
 
-- Postgres + pgvector backend (currently SQLite only).
+- Postgres + pgvector backend is available as an optional, explicitly configured backend; SQLite remains the default.
 - Tenant / namespace isolation (schema fields exist; enforcement not yet built).
 - Scoring profiles stored in DB.
 - Re-embedding job scheduler (manual `/re-embed` endpoint exists; no automatic scheduling).
