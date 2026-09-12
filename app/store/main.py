@@ -1105,6 +1105,10 @@ class SqliteStore:
         return False
 
     @classmethod
+    def is_memory_item_visible(cls, item: dict[str, Any], access: dict[str, Any]) -> bool:
+        return cls._scope_visible(item, access)
+
+    @classmethod
     def _apply_access_filter(cls, items: list[dict[str, Any]], access: dict[str, Any] | None, top_k: int) -> list[dict[str, Any]]:
         if not access:
             return items[:top_k]

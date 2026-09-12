@@ -795,6 +795,10 @@ class PostgresStore:
             return bool(access.get("session_id") and scope.get("session_id") == access.get("session_id"))
         return False
 
+    @classmethod
+    def is_memory_item_visible(cls, item: dict[str, Any], access: dict[str, Any]) -> bool:
+        return cls._scope_visible(item, access)
+
     def update_memory_item_embedding(self, item_id: str, embedding: list[float], model_id: str) -> None:
         with self._conn.cursor() as cur:
             cur.execute(sql.SQL("UPDATE {table} SET embedding = %s, embedding_model = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s").format(table=self._table("memory_items")), (embedding, model_id, item_id))
