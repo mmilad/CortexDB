@@ -29,6 +29,12 @@ build-backend = "setuptools.build_meta"
 vec = [
   "sqlite-vec>=0.1.0",
 ]
+# PostgreSQL is optional so the zero-dependency SQLite development path stays
+# available. Install this extra when CORTEXDB_DATABASE_URL is configured.
+postgres = [
+  "psycopg[binary]>=3.2.0",
+  "pgvector>=0.3.6",
+]
 dev = [
   "pytest>=7.0",
   "pytest-asyncio>=0.21",

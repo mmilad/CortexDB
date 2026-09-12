@@ -14,7 +14,7 @@ from pathlib import Path
 
 from fastapi import HTTPException, Request
 
-from app.store import SqliteStore, get_store
+from app.store import PostgresStore, SqliteStore, get_store, postgres_schema_for_namespace
 
 _NAMESPACE_ENV_VAR = "CORTEXDB_NAMESPACE_DIR"
 _DB_PATH_ENV_VAR = "CORTEXDB_DB_PATH"
@@ -36,7 +36,7 @@ _RESERVED_PATH_PARTS = {
     "tools",
 }
 
-_stores: dict[str, SqliteStore] = {}
+_stores: dict[str, SqliteStore | PostgresStore] = {}
 
 
 def validate_namespace(name: str) -> str:
@@ -118,7 +118,7 @@ def _store_key(namespace: str, subspace: str | None = None) -> str:
     return f"{namespace}/{subspace}"
 
 
-def get_namespace_store(namespace: str, subspace: str | None = None) -> SqliteStore:
+def get_namespace_store(namespace: str, subspace: str | None = None) -> SqliteStore | PostgresStore:
     namespace = validate_namespace(namespace)
     if subspace is not None:
         subspace = validate_namespace(subspace)
@@ -126,13 +126,20 @@ def get_namespace_store(namespace: str, subspace: str | None = None) -> SqliteSt
     key = _store_key(namespace, subspace)
     store = _stores.get(key)
     if store is None:
-        path = subspace_db_path(namespace, subspace) if subspace else namespace_db_path(namespace)
-        store = SqliteStore(str(path))
+        database_url = os.environ.get("CORTEXDB_DATABASE_URL")
+        if database_url:
+            store = PostgresStore(
+                database_url,
+                schema=postgres_schema_for_namespace(namespace, subspace),
+            )
+        else:
+            path = subspace_db_path(namespace, subspace) if subspace else namespace_db_path(namespace)
+            store = SqliteStore(str(path))
         _stores[key] = store
     return store
 
 
-def get_store_for_request(request: Request) -> SqliteStore:
+def get_store_for_request(request: Request) -> SqliteStore | PostgresStore:
     namespace = request.path_params.get("namespace")
     if namespace:
         subspace = request.path_params.get("subspace")

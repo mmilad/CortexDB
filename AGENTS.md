@@ -94,8 +94,13 @@ Tests still pass; vector search falls back to a Python cosine scan.
 | `CORTEXDB_EMBED_API_KEY` | _(unset)_ | API key for `api` provider |
 | `CORTEXDB_OLLAMA_AUTOSTART` | `true` | Auto-start `ollama serve` if not reachable |
 | `CORTEXDB_DB_PATH` | `cortexdb.sqlite` | Absolute path to the SQLite file |
+| `CORTEXDB_DATABASE_URL` | _(unset)_ | PostgreSQL connection URL; enables the Postgres backend |
+| `CORTEXDB_DATABASE_SCHEMA` | `cortexdb` | Schema used by the Postgres backend |
 
 Set `CORTEXDB_EMBED_PROVIDER=none` whenever embedding is not needed (tests, registry work, MCP reads). This avoids any Ollama dependency.
+
+PostgreSQL support is optional. Install it with `pip install -e '.[postgres]'`.
+When `CORTEXDB_DATABASE_URL` is unset, CortexDB continues to use SQLite.
 
 ---
 

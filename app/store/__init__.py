@@ -13,10 +13,13 @@ from app.store.main import (
     close_store,
     get_store,
 )
+from app.store.postgres import PostgresStore, postgres_schema_for_namespace
 from app.store.search import cosine_similarity
 
 __all__ = [
     "SqliteStore",
+    "PostgresStore",
+    "postgres_schema_for_namespace",
     "close_store",
     "get_store",
     "cosine_similarity",

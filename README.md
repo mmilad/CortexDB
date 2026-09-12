@@ -30,7 +30,7 @@ CortexDB is a **LLM-native memory and retrieval layer** for agentic systems.
 | MCP `input_schema_ref` URL resolution | ✅ |
 | Re-embedding jobs (`/datasets/{key}/re-embed`) | ✅ |
 | Dataset metadata validation (`/datasets/{key}/validate`) | ✅ |
-| Postgres + pgvector backend | Planned |
+| Postgres + pgvector backend | ✅ (optional) |
 | Tenant / namespace isolation | Planned |
 | Scoring profiles stored in DB | Planned |
 

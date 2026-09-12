@@ -50,6 +50,7 @@ logger = logging.getLogger("cortexdb.store")
 
 _DB_PATH_ENV_VAR = "CORTEXDB_DB_PATH"
 _DEFAULT_DB_PATH = "cortexdb.sqlite"
+_DATABASE_URL_ENV_VAR = "CORTEXDB_DATABASE_URL"
 
 _DDL = """\
 PRAGMA journal_mode=WAL;
@@ -1345,13 +1346,22 @@ class SqliteStore:
 # Singleton + FastAPI dependency
 # ------------------------------------------------------------------
 
-_store: SqliteStore | None = None
+_store: Any | None = None
 
 
-def get_store() -> SqliteStore:
+def get_store() -> Any:
     global _store
     if _store is None:
-        _store = SqliteStore()
+        database_url = os.environ.get(_DATABASE_URL_ENV_VAR)
+        if database_url:
+            from app.store.postgres import PostgresStore
+
+            _store = PostgresStore(
+                database_url,
+                schema=os.environ.get("CORTEXDB_DATABASE_SCHEMA", "cortexdb"),
+            )
+        else:
+            _store = SqliteStore()
     return _store
 
 
