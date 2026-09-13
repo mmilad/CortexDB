@@ -41,6 +41,7 @@ def test_postgres_store_scopes_hybrid_records_and_cascades() -> None:
         relationship = store.get_relationship(f"{dataset_key}_relation")
         assert relationship is not None
         assert isinstance(relationship["created_at"], str)
+        assert store._conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE  # type: ignore[attr-defined]
         store.insert_memory_item({
             "id": f"{dataset_key}_alice",
             "dataset_key": dataset_key,

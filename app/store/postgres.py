@@ -74,7 +74,12 @@ class PostgresStore:
             raise ValueError(f"invalid PostgreSQL schema name: {schema!r}")
         self.schema = schema
         self._conn = psycopg.connect(database_url or os.environ["CORTEXDB_DATABASE_URL"], row_factory=dict_row)
-        self._conn.autocommit = False
+        # The store keeps one connection per API/namespace. Read endpoints do
+        # not have an explicit transaction boundary, so leaving autocommit off
+        # would keep every SELECT in an idle transaction and block later schema
+        # checks (notably after a Postgres restart). Mutations still call
+        # commit() for compatibility; psycopg treats that as a no-op here.
+        self._conn.autocommit = True
         self._ensure_schema()
         register_vector(self._conn)
 
