@@ -11,7 +11,7 @@ from app.ingest.chunking import chunk_text
 from app.ingest.sources import SourceDocument, iter_source_documents
 from app.processors.service import ProcessorService
 from app.processors.validation import ProcessorValidationError, validate_processor_response
-from app.schemas.memory import IngestItem, IngestResult
+from app.schemas.memory import IngestItem, IngestResult, KnowledgeScope
 from app.schemas.processor import ProcessorJobResult, ProcessorRequest, ProcessorResponse, ProcessorStrategy
 from app.services.memory import ingest_items_to_dataset
 from app.store import SqliteStore
@@ -57,6 +57,7 @@ def _build_doc_items(
     ingestion_id: str,
     max_chars: int,
     overlap_chars: int,
+    scope: KnowledgeScope,
 ) -> list[IngestItem]:
     chunks = chunk_text(doc.text, max_chars=max_chars, overlap_chars=overlap_chars)
     source_sha256 = _sha256(doc.text)
@@ -87,7 +88,7 @@ def _build_doc_items(
             chunk_index,
             content_sha256,
         )[:32]
-        items.append(IngestItem(id=item_id, raw_text=raw_text, metadata=item_metadata))
+        items.append(IngestItem(id=item_id, raw_text=raw_text, metadata=item_metadata, scope=scope))
 
     return items
 
@@ -100,6 +101,7 @@ def _build_processor_items(
     ingestion_id: str,
     max_chars: int,
     overlap_chars: int,
+    scope: KnowledgeScope,
 ) -> list[IngestItem]:
     source_sha256 = _sha256(doc.text)
     chunk_count = len(response.chunks)
@@ -140,7 +142,7 @@ def _build_processor_items(
             chunk.char_end,
             content_sha256,
         )[:32]
-        items.append(IngestItem(id=item_id, raw_text=raw_text, metadata=item_metadata))
+        items.append(IngestItem(id=item_id, raw_text=raw_text, metadata=item_metadata, scope=scope))
 
     return items
 
@@ -151,6 +153,7 @@ def _build_primitive_items(
     *,
     metadata: dict[str, Any],
     ingestion_id: str,
+    scope: KnowledgeScope,
 ) -> list[IngestItem]:
     source_sha256 = _sha256(doc.text)
     items: list[IngestItem] = []
@@ -191,7 +194,7 @@ def _build_primitive_items(
             index,
             content_sha256,
         )[:32]
-        items.append(IngestItem(id=item_id, raw_text=raw_text, metadata=item_metadata))
+        items.append(IngestItem(id=item_id, raw_text=raw_text, metadata=item_metadata, scope=scope))
     return items
 
 
@@ -202,6 +205,7 @@ def build_ingest_items(
     overlap_chars: int = DEFAULT_OVERLAP_CHARS,
     metadata: dict[str, Any] | None = None,
     ingestion_id: str | None = None,
+    scope: KnowledgeScope | None = None,
 ) -> list[IngestItem]:
     """Convert a text source, file, or directory into CortexDB ingest items."""
     docs = iter_source_documents(source)
@@ -221,6 +225,7 @@ def build_ingest_items(
                 ingestion_id=resolved_ingestion_id,
                 max_chars=max_chars,
                 overlap_chars=overlap_chars,
+                scope=scope or KnowledgeScope(),
             )
         )
     return items
@@ -236,6 +241,7 @@ async def build_ingest_items_with_processor(
     overlap_chars: int = DEFAULT_OVERLAP_CHARS,
     metadata: dict[str, Any] | None = None,
     ingestion_id: str | None = None,
+    scope: KnowledgeScope | None = None,
 ) -> tuple[list[IngestItem], ProcessorJobResult | None]:
     """Build ingest items, optionally using a processor service for chunks."""
     if processor_strategy == "fallback":
@@ -246,6 +252,7 @@ async def build_ingest_items_with_processor(
                 overlap_chars=overlap_chars,
                 metadata=metadata,
                 ingestion_id=ingestion_id,
+                scope=scope,
             ),
             None,
         )
@@ -265,6 +272,7 @@ async def build_ingest_items_with_processor(
                 overlap_chars=overlap_chars,
                 metadata=metadata,
                 ingestion_id=resolved_ingestion_id,
+                scope=scope,
             ),
             ProcessorJobResult(
                 status="skipped",
@@ -296,6 +304,7 @@ async def build_ingest_items_with_processor(
                     ingestion_id=resolved_ingestion_id,
                     max_chars=max_chars,
                     overlap_chars=overlap_chars,
+                    scope=scope or KnowledgeScope(),
                 )
             )
             if extract_primitives:
@@ -304,6 +313,7 @@ async def build_ingest_items_with_processor(
                     response,
                     metadata=base_metadata,
                     ingestion_id=resolved_ingestion_id,
+                    scope=scope or KnowledgeScope(),
                 )
                 primitive_count += len(primitive_items)
                 items.extend(primitive_items)
@@ -314,6 +324,7 @@ async def build_ingest_items_with_processor(
             overlap_chars=overlap_chars,
             metadata=metadata,
             ingestion_id=resolved_ingestion_id,
+            scope=scope,
         )
         return (
             fallback_items,
@@ -349,6 +360,7 @@ async def ingest_source_to_dataset(
     processor_svc: ProcessorService | None = None,
     processor_strategy: ProcessorStrategy = "fallback",
     extract_primitives: bool = False,
+    scope: KnowledgeScope | None = None,
 ) -> IngestResult:
     """Build and ingest source chunks into a dataset using existing ingest logic."""
     if batch_size < 1:
@@ -363,6 +375,7 @@ async def ingest_source_to_dataset(
         overlap_chars=overlap_chars,
         metadata=metadata,
         ingestion_id=ingestion_id,
+        scope=scope,
     )
 
     ids: list[str] = []
@@ -390,6 +403,7 @@ async def ingest_directory_to_dataset(
     processor_svc: ProcessorService | None = None,
     processor_strategy: ProcessorStrategy = "fallback",
     extract_primitives: bool = False,
+    scope: KnowledgeScope | None = None,
 ) -> IngestResult:
     """Ingest all supported files in a directory tree."""
     path = Path(directory_path)
@@ -404,6 +418,7 @@ async def ingest_directory_to_dataset(
         overlap_chars=overlap_chars,
         metadata=metadata,
         ingestion_id=ingestion_id,
+        scope=scope,
         batch_size=batch_size,
         processor_svc=processor_svc,
         processor_strategy=processor_strategy,

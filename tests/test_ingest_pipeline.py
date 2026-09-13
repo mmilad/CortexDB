@@ -6,6 +6,7 @@ import pytest
 
 from app.ingest import build_ingest_items, chunk_text, ingest_source_to_dataset
 from app.processors.safe import process_text_safe
+from app.schemas.memory import KnowledgeScope
 from app.schemas.processor import ProcessorRequest, ProcessorResponse
 from app.store import SqliteStore
 
@@ -88,6 +89,20 @@ def test_build_ingest_items_metadata_and_stable_ids_for_text() -> None:
     assert first[0].metadata["content_sha256"]
     assert first[0].metadata["source_sha256"]
     assert first[0].metadata["ingestion_id"].startswith("ingest-")
+
+
+def test_build_ingest_items_preserves_scope_on_every_chunk() -> None:
+    scope = KnowledgeScope(kind="personal", owner_id="alice")
+
+    items = build_ingest_items(
+        "Alpha paragraph.\n\nBeta paragraph.\n\nGamma paragraph.",
+        max_chars=25,
+        overlap_chars=5,
+        scope=scope,
+    )
+
+    assert items
+    assert all(item.scope == scope for item in items)
 
 
 def test_build_ingest_items_hashes_change_when_content_changes() -> None:

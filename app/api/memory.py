@@ -121,6 +121,7 @@ async def ingest_text_source(
             overlap_chars=body.overlap_chars,
             metadata=body.metadata,
             ingestion_id=body.ingestion_id,
+            scope=body.scope,
             batch_size=body.batch_size,
             processor_svc=processor_svc,
             processor_strategy=body.processor_strategy,

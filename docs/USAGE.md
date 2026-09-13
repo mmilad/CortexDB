@@ -386,6 +386,7 @@ curl -X POST http://127.0.0.1:5000/datasets/tech_knowledge/ingest/text \
   -d '{
     "text": "# Runbook\n\nRestart the API worker after rotating credentials.",
     "metadata": {"component": "api", "kind": "runbook"},
+    "scope": {"kind": "project", "project_key": "PLAN"},
     "max_chars": 2000,
     "overlap_chars": 200,
     "batch_size": 100

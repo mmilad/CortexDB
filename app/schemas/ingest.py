@@ -6,11 +6,16 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.memory import KnowledgeScope
 from app.schemas.processor import ProcessorStrategy
 
 
 class IngestTextRequest(BaseModel):
     text: str = Field(..., min_length=1, description="Raw text to chunk and ingest.")
+    scope: KnowledgeScope = Field(
+        default_factory=KnowledgeScope,
+        description="Ownership scope copied to every generated chunk.",
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Caller metadata merged into each generated chunk.",
