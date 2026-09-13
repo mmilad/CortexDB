@@ -22,6 +22,7 @@ from app.schemas.ingest import IngestTextRequest
 from app.schemas.memory import (
     IngestRequest,
     IngestResult,
+    KnowledgeAccess,
     KnowledgeScope,
     MemoryItem,
     SearchHit,
@@ -239,7 +240,7 @@ def get_item(
     dataset_key: str,
     item_id: str,
     store: Annotated[SqliteStore, Depends(get_store)],
-    access: Annotated[KnowledgeAccess, Depends()],
+    access: KnowledgeAccess = Depends(),
     include_deleted: bool = Query(
         default=False,
         description="When true, a soft-deleted item is returned instead of 404.",
