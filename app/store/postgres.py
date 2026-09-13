@@ -22,11 +22,13 @@ try:  # Keep SQLite-only installs usable without the optional extra.
     from psycopg.rows import dict_row
     from psycopg.types.json import Jsonb
     from pgvector.psycopg import register_vector
+    from pgvector.psycopg.vector import Vector
 except ImportError:  # pragma: no cover - exercised only when Postgres is requested
     psycopg = None  # type: ignore[assignment]
     sql = None  # type: ignore[assignment]
     dict_row = None  # type: ignore[assignment]
     Jsonb = None  # type: ignore[assignment,misc]
+    Vector = None  # type: ignore[assignment,misc]
     register_vector = None  # type: ignore[assignment]
 
 
@@ -44,6 +46,8 @@ def _json(value: Any) -> Any:
 def _vector(value: Any) -> list[float] | None:
     if value is None:
         return None
+    if hasattr(value, "to_list"):
+        return [float(part) for part in value.to_list()]
     if isinstance(value, str):
         raw = value.strip("[]")
         return [float(part) for part in raw.split(",") if part.strip()]
@@ -762,7 +766,7 @@ class PostgresStore:
             # pgvector computes the distance in PostgreSQL. The Python cosine
             # fallback below only handles rows without a usable score.
             vector_select = ", (1 - (embedding <=> %s)) AS db_vector_score"
-            params.append(query_vector)
+            params.append(Vector(query_vector) if Vector is not None else query_vector)
         params.append(dataset_key)
         with self._conn.cursor() as cur:
             cur.execute(sql.SQL("SELECT *" + vector_select + " FROM {table} WHERE dataset_key = %s AND NOT is_deleted").format(table=self._table("memory_items")), tuple(params))

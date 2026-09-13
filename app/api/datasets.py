@@ -48,7 +48,7 @@ def _embed_text_for_dataset(record: DatasetRecord) -> str:
         "Falls back to token-overlap scoring when embedding is unavailable."
     ),
 )
-def post_discover_datasets(
+async def post_discover_datasets(
     body: DatasetDiscoverRequest,
     store: Annotated[SqliteStore, Depends(get_store)],
     embed_svc: Annotated[EmbeddingService, Depends(get_embedding_service)],
@@ -57,7 +57,7 @@ def post_discover_datasets(
     intent_vector: list[float] | None = None
     if embed_svc.is_enabled():
         try:
-            intent_vector = embed_svc.embed_one(body.intent)
+            intent_vector = await embed_svc.embed_one(body.intent)
         except Exception as exc:
             logger.warning("Could not embed intent for discovery: %s", exc)
 
@@ -65,7 +65,7 @@ def post_discover_datasets(
 
 
 @router.post("/datasets", response_model=DatasetRecord)
-def upsert_dataset(
+async def upsert_dataset(
     record: DatasetRecord,
     store: Annotated[SqliteStore, Depends(get_store)],
     embed_svc: Annotated[EmbeddingService, Depends(get_embedding_service)],
@@ -76,7 +76,7 @@ def upsert_dataset(
     if embed_svc.is_enabled():
         try:
             raw_text = _embed_text_for_dataset(record)
-            vector = embed_svc.embed_one(raw_text)
+            vector = await embed_svc.embed_one(raw_text)
             store.set_dataset_embedding(record.dataset_key, raw_text, vector, embed_svc.model_id)
         except Exception as exc:
             # Log and continue — embedding failure does not block registration.
