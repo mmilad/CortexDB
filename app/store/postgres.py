@@ -71,8 +71,8 @@ class PostgresStore:
         self.schema = schema
         self._conn = psycopg.connect(database_url or os.environ["CORTEXDB_DATABASE_URL"], row_factory=dict_row)
         self._conn.autocommit = False
-        register_vector(self._conn)
         self._ensure_schema()
+        register_vector(self._conn)
 
     def _table(self, name: str) -> sql.Composed:
         return sql.SQL(".").join((sql.Identifier(self.schema), sql.Identifier(name)))
@@ -419,10 +419,21 @@ class PostgresStore:
                   join_fields = EXCLUDED.join_fields, description = EXCLUDED.description""").format(table=self._table("relationships")), (rel["id"], rel["source_type"], rel["source_key"], rel["target_type"], rel["target_key"], rel["edge_type"], _jsonb(rel.get("join_fields", [])), rel.get("description", "")))
         self._conn.commit()
 
+    @staticmethod
+    def _row_to_relationship(row: dict[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        result["join_fields"] = _json(result.get("join_fields", []))
+        for key in ("created_at",):
+            value = result.get(key)
+            if value is not None and hasattr(value, "isoformat"):
+                result[key] = value.isoformat()
+        return result
+
     def get_relationship(self, rel_id: str) -> dict[str, Any] | None:
         with self._conn.cursor() as cur:
             cur.execute(sql.SQL("SELECT * FROM {table} WHERE id = %s").format(table=self._table("relationships")), (rel_id,))
-            return cur.fetchone()
+            row = cur.fetchone()
+        return self._row_to_relationship(row) if row else None
 
     def list_relationships(self, source_key: str | None = None, target_key: str | None = None) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -438,9 +449,7 @@ class PostgresStore:
         with self._conn.cursor() as cur:
             cur.execute(query, tuple(params))
             rows = cur.fetchall()
-        for row in rows:
-            row["join_fields"] = _json(row["join_fields"])
-        return rows
+        return [self._row_to_relationship(row) for row in rows]
 
     def delete_relationship(self, rel_id: str) -> bool:
         with self._conn.cursor() as cur:

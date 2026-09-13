@@ -30,6 +30,17 @@ def test_postgres_store_scopes_hybrid_records_and_cascades() -> None:
     dataset_key = f"test_{uuid.uuid4().hex}"
     try:
         store.upsert_dataset(dataset_key, {"display_name": "Postgres test"})
+        store.upsert_relationship({
+            "id": f"{dataset_key}_relation",
+            "source_type": "dataset",
+            "source_key": dataset_key,
+            "target_type": "dataset",
+            "target_key": dataset_key,
+            "edge_type": "related",
+        })
+        relationship = store.get_relationship(f"{dataset_key}_relation")
+        assert relationship is not None
+        assert isinstance(relationship["created_at"], str)
         store.insert_memory_item({
             "id": f"{dataset_key}_alice",
             "dataset_key": dataset_key,
