@@ -62,3 +62,21 @@ def test_migration_is_idempotent_and_preserves_stable_records(tmp_path) -> None:
     finally:
         source.close()
         target.close()
+
+
+def test_migration_merge_allows_existing_target_records(tmp_path) -> None:
+    source = SqliteStore(str(tmp_path / "source-merge.sqlite"))
+    target = SqliteStore(str(tmp_path / "target-merge.sqlite"))
+    try:
+        source.upsert_dataset("project-plan", {"display_name": "Project plan"})
+        target.upsert_dataset("unrelated", {"display_name": "Existing catalog item"})
+
+        source_counts, target_counts = migrate_sqlite_to_postgres(source, target, allow_existing=True)
+
+        assert source_counts.datasets == 1
+        assert target_counts.datasets == 2
+        assert target.get_dataset("project-plan")["display_name"] == "Project plan"
+        assert target.get_dataset("unrelated")["display_name"] == "Existing catalog item"
+    finally:
+        source.close()
+        target.close()

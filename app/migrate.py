@@ -46,7 +46,12 @@ def _counts(store: Any) -> MigrationCounts:
     )
 
 
-def migrate_sqlite_to_postgres(source: SqliteStore, target: PostgresStore) -> tuple[MigrationCounts, MigrationCounts]:
+def migrate_sqlite_to_postgres(
+    source: SqliteStore,
+    target: PostgresStore,
+    *,
+    allow_existing: bool = False,
+) -> tuple[MigrationCounts, MigrationCounts]:
     """Copy all durable SQLite records without changing their stable IDs.
 
     Target methods are upserts, so the operation can be safely repeated after
@@ -80,9 +85,20 @@ def migrate_sqlite_to_postgres(source: SqliteStore, target: PostgresStore) -> tu
 
     source_counts = _counts(source)
     target_counts = _counts(target)
-    if source_counts != target_counts:
+    counts_match = (
+        all(
+            getattr(source_counts, field) == getattr(target_counts, field)
+            for field in MigrationCounts.__dataclass_fields__
+        )
+        if not allow_existing
+        else all(
+            getattr(source_counts, field) <= getattr(target_counts, field)
+            for field in MigrationCounts.__dataclass_fields__
+        )
+    )
+    if not counts_match:
         raise RuntimeError(
-            "SQLite to PostgreSQL migration count mismatch:\n"
+            "SQLite to PostgreSQL migration count mismatch" + (" in merge mode" if allow_existing else "") + ":\n"
             f"source={json.dumps(asdict(source_counts), sort_keys=True)}\n"
             f"target={json.dumps(asdict(target_counts), sort_keys=True)}"
         )
@@ -94,6 +110,11 @@ def main() -> None:
     parser.add_argument("--source", default="cortexdb.sqlite", help="SQLite database path.")
     parser.add_argument("--database-url", help="PostgreSQL URL; defaults to CORTEXDB_DATABASE_URL.")
     parser.add_argument("--schema", default="cortexdb", help="PostgreSQL schema name.")
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="Allow pre-existing target records; source counts must be contained by target counts.",
+    )
     args = parser.parse_args()
 
     source_path = Path(args.source)
@@ -103,7 +124,7 @@ def main() -> None:
     source = SqliteStore(str(source_path))
     target = PostgresStore(args.database_url, schema=args.schema)
     try:
-        source_counts, target_counts = migrate_sqlite_to_postgres(source, target)
+        source_counts, target_counts = migrate_sqlite_to_postgres(source, target, allow_existing=args.merge)
     finally:
         source.close()
         target.close()
