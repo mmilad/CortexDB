@@ -80,3 +80,23 @@ def test_migration_merge_allows_existing_target_records(tmp_path) -> None:
     finally:
         source.close()
         target.close()
+
+
+def test_migration_merge_never_overwrites_existing_records(tmp_path) -> None:
+    source = SqliteStore(str(tmp_path / "source-overlap.sqlite"))
+    target = SqliteStore(str(tmp_path / "target-overlap.sqlite"))
+    try:
+        source.upsert_dataset("shared", {"display_name": "Source version"})
+        source.upsert_tool("shared-tool", {"name": "Source version"})
+        target.upsert_dataset("shared", {"display_name": "Target version"})
+        target.upsert_tool("shared-tool", {"name": "Target version"})
+
+        source_counts, target_counts = migrate_sqlite_to_postgres(source, target, allow_existing=True)
+
+        assert source_counts.datasets == 1
+        assert target_counts.datasets == 1
+        assert target.get_dataset("shared")["display_name"] == "Target version"
+        assert target.get_tool("shared-tool")["name"] == "Target version"
+    finally:
+        source.close()
+        target.close()
